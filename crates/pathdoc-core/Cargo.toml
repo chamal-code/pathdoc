@@ -11,3 +11,13 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+# Chosen over the `windows` crate because every Reg* function there is an
+# `unsafe fn`, which would put an `unsafe` block in this crate — forbidden at
+# workspace level. winreg is a thin safe wrapper over `windows-sys` that keeps
+# that unsafe in the dependency, exposes the value type through `RegValue.vtype`
+# so REG_SZ and REG_EXPAND_SZ stay distinguishable, and returns values
+# unexpanded, which is what the spec needs.
+#
+# Pinned exactly: this is the one place the tool reads privileged machine state,
+# so the version is a deliberate decision rather than whatever resolves today.
+winreg = { version = "=0.56.0", default-features = false }

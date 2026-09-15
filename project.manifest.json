@@ -5,13 +5,14 @@
   "purpose": "Windows PATH auditor that reports dead entries, duplicates and shadowed executables, resolving machine and user PATH in true composition order.",
   "status": "active",
   "created": "2026-09-15",
-  "lastReviewed": "2026-09-15",
+  "lastReviewed": "2026-09-16",
   "stack": {
     "languages": ["Rust"],
     "runtimes": ["rust@stable"],
     "packageManagers": ["cargo"],
     "frameworks": [],
-    "datastores": []
+    "datastores": [],
+    "keyDependencies": ["winreg@=0.56.0"]
   },
   "git": {
     "isRepo": true,
@@ -31,5 +32,5 @@
   ],
   "graduatedFrom": null,
   "tags": ["windows", "cli", "rust", "diagnostics", "first-project"],
-  "notes": "First Rust project on this machine, chosen as a workflow shakedown. Deliberately read-only in slice 1: it reports, it never writes PATH. Born from real PATH shadowing hit during machine provisioning on 2026-09-15."
+  "notes": "First Rust project on this machine, chosen as a workflow shakedown. Deliberately read-only in slice 1: it reports, it never writes PATH. Born from real PATH shadowing hit during machine provisioning on 2026-09-15. Slice 1 progress: registry reading and PATH composition done (winreg, chosen over the windows crate so the unsafe stays in the dependency); executable enumeration, shadow detection and output formatting still to come."
 }

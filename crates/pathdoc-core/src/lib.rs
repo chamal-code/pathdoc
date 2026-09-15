@@ -6,6 +6,10 @@
 //!
 //! See `docs/SPEC.md` for the behaviour this models.
 
+mod compose;
+mod probe;
+mod registry;
+
 /// Where a `PATH` entry came from.
 ///
 /// Windows composes the effective `PATH` as machine entries first, then user
@@ -73,6 +77,15 @@ pub struct PathEntry {
     pub findings: Vec<Finding>,
 }
 
+impl PathEntry {
+    /// The directory Windows actually resolves for this entry: the expansion
+    /// where there was one, otherwise the raw value.
+    #[must_use]
+    pub fn effective(&self) -> &str {
+        self.expanded.as_deref().unwrap_or(&self.raw)
+    }
+}
+
 /// One executable file found inside a `PATH` entry.
 #[derive(Debug, Clone)]
 pub struct Occurrence {
@@ -131,23 +144,43 @@ impl std::error::Error for AuditError {}
 
 /// Audit the Windows `PATH`.
 ///
+/// Reads the stored value from both registry scopes, composes them the way
+/// Windows does, then adds per-entry findings. The live process `PATH` is read
+/// too, but only to discover directories injected at runtime.
+///
 /// # Errors
 ///
 /// Returns [`AuditError::Registry`] when the machine or user environment key
-/// cannot be read.
+/// cannot be read. A scope that simply has no `Path` value is not an error; it
+/// contributes no entries.
 ///
 /// # Implementation status
 ///
-/// Skeleton only. The data model above is settled; the logic is the first task
-/// in the project window. Returns an empty report so the workspace builds and
-/// tests green from the first commit.
+/// Composition and per-entry findings are implemented. Executable enumeration,
+/// `PATHEXT` handling, shadow detection and the [`Finding::Unreadable`] verdict
+/// are the next task, so [`AuditReport::shadows`] is always empty for now.
 pub fn audit() -> Result<AuditReport, AuditError> {
-    Ok(AuditReport::default())
+    let machine = registry::read_machine_path()?;
+    let user = registry::read_user_path()?;
+    let process = std::env::var("PATH").ok();
+
+    // Environment lookups on Windows are case-insensitive, so `%SystemRoot%`
+    // and `%SYSTEMROOT%` both resolve through this.
+    let lookup = |name: &str| std::env::var(name).ok();
+
+    let mut entries =
+        compose::compose(machine.as_ref(), user.as_ref(), process.as_deref(), &lookup);
+    probe::annotate(&mut entries);
+
+    Ok(AuditReport {
+        entries,
+        shadows: Vec::new(),
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{AuditReport, audit};
+    use super::{AuditReport, PathEntry, PathScope, audit};
 
     #[test]
     fn empty_report_has_no_findings() {
@@ -155,7 +188,34 @@ mod tests {
     }
 
     #[test]
-    fn skeleton_audit_succeeds() {
-        assert!(audit().is_ok());
+    fn the_effective_value_prefers_the_expansion() {
+        let mut entry = PathEntry {
+            index: 0,
+            scope: PathScope::Machine,
+            raw: r"%SystemRoot%".to_owned(),
+            expanded: None,
+            value_kind: None,
+            findings: Vec::new(),
+        };
+        assert_eq!(entry.effective(), r"%SystemRoot%");
+
+        entry.expanded = Some(r"C:\WINDOWS".to_owned());
+        assert_eq!(entry.effective(), r"C:\WINDOWS");
+    }
+
+    #[test]
+    fn audit_reads_the_registry_and_composes_something() {
+        // Portable: every Windows machine has a machine `PATH`, so the composed
+        // list cannot be empty. What is *in* it is asserted by the machine
+        // specific integration test.
+        match audit() {
+            Ok(report) => {
+                assert!(!report.entries.is_empty());
+                for (position, entry) in report.entries.iter().enumerate() {
+                    assert_eq!(entry.index, position);
+                }
+            }
+            Err(err) => panic!("audit failed: {err}"),
+        }
     }
 }
