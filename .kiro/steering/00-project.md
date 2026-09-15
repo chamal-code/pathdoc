@@ -41,6 +41,13 @@ explicitly a later slice.
   directory on activation.
 - Report reparse points rather than following them, so Store alias stubs stay
   identifiable.
+- **`cargo test` pollutes the process `PATH` of the test binary.** It prepends
+  `target\debug`, `target\debug\deps` and two toolchain directories, so a test
+  sees four more process-only entries than the shell that launched it. Hit while
+  writing `tests/this_machine.rs`, which originally asserted one process-only
+  entry and found five. Never assert a *count* of process-only entries from
+  inside a test; name the directory you care about. The binary run directly
+  reports 23 entries, `cargo run` reports 27.
 
 ## Test fixtures
 

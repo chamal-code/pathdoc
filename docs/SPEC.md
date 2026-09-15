@@ -109,13 +109,19 @@ Matching the convention already used across this machine's tooling.
 The acceptance test is unusually concrete, because the expected answers were
 established by hand during provisioning. On this machine, slice 1 must:
 
-- report exactly one dead entry, `...\AppData\Local\Programs\Ollama`
-- report three `git.exe`, with `C:\Program Files\Git\cmd` winning
-- report the vendored `gzip.exe`, `bash.exe`, `unzip.exe`, `sdiff.exe`
-- report `python.exe` resolving from `~\.local\bin`, with no `WindowsApps` stub
+- [x] report exactly one dead entry, `...\AppData\Local\Programs\Ollama`
+- [ ] report three `git.exe`, with `C:\Program Files\Git\cmd` winning
+- [ ] report the vendored `gzip.exe`, `bash.exe`, `unzip.exe`, `sdiff.exe`
+- [ ] report `python.exe` resolving from `~\.local\bin`, with no `WindowsApps` stub
   remaining
-- report `uv.exe` twice, with `...\WinGet\Links` winning
-- **not** flag the `fnm_multishells` process-only entry as an error
+- [ ] report `uv.exe` twice, with `...\WinGet\Links` winning
+- [x] **not** flag the `fnm_multishells` process-only entry as an error
+
+The two checked items are covered by `crates/pathdoc-core/tests/this_machine.rs`,
+which also pins the composition itself: 8 machine entries, 14 user, 22 composed,
+`C:\WINDOWS\system32` at index 0 stored as `%SystemRoot%\system32`,
+`C:\Program Files\Git\cmd` at index 7, and the first user entry at index 8.
+The four unchecked items all need executable enumeration.
 
 Cross-check shadowing against PowerShell's own resolver, which is the
 independent reference:
