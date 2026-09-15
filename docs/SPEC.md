@@ -94,6 +94,65 @@ Flags for slice 1:
 pathdoc [--json] [--scope machine|user|all] [--shadows-only] [--no-color]
 ```
 
+`--scope` and `--shadows-only` filter what is **reported**. They never change how
+`PATH` is composed, and entries keep the index they hold in the full composed
+order — `--scope user` on this machine starts at index 8, not 0. A renumbered
+index would throw away the one thing composition order is for.
+
+Colour is decided by `anstream`: it honours `NO_COLOR` and `CLICOLOR`, checks
+whether the destination is a terminal, and turns on virtual terminal processing
+where Windows needs it. `--no-color` forces it off regardless.
+
+### The JSON contract
+
+`--json` is what a GUI consumes, so the shape is versioned and the field names are
+fixed. The types are defined once in `pathdoc-core` and derive their
+serialisation there, behind a `serde` feature, so a front end that links the
+library and one that parses this output cannot drift apart.
+
+```json
+{
+  "schemaVersion": 1,
+  "capabilities": ["composition", "entryFindings"],
+  "entries": [
+    {
+      "index": 0,
+      "scope": "machine",
+      "raw": "%SystemRoot%\\system32",
+      "expanded": "C:\\WINDOWS\\system32",
+      "valueKind": "REG_EXPAND_SZ",
+      "findings": []
+    }
+  ],
+  "shadows": []
+}
+```
+
+Rules the shape follows:
+
+- **camelCase** field names, matching the trunk's other JSON.
+- `scope` is `machine`, `user` or `processOnly`.
+- `valueKind` is `REG_SZ`, `REG_EXPAND_SZ`, or `null` for an entry that came from
+  no registry value at all. The real registry type names, because whoever reads
+  this is likely to have `regedit` open next to it.
+- `expanded` is `null` rather than absent when there was nothing to expand, so a
+  typed consumer gets `string | null` and not `string | undefined`. The
+  directory Windows actually resolves is `expanded ?? raw`. That is deliberately
+  not its own field: a derived field in a wire shape is a field that can
+  contradict the two it derives from.
+- `findings` entries are a discriminated union on `kind`: `{"kind": "missing"}`,
+  `{"kind": "duplicate", "firstSeenAt": 0}`.
+- `capabilities` says what the run actually computed. **An empty `shadows` means
+  "nothing is shadowed" only when `shadowDetection` is listed; otherwise it means
+  "not computed".** Without this a consumer shows a clean bill of health for work
+  that never ran, which is worse than showing nothing.
+- `schemaVersion` bumps only on a breaking change: a field removed or renamed, an
+  enum representation altered, or an existing field's meaning changed. Adding a
+  field, a variant, or a capability is additive and does not bump it.
+
+The assertions pinning all of the above live in `crates/pathdoc-cli/src/json.rs`,
+so breaking the contract breaks a test.
+
 ### Exit codes
 
 | Code | Meaning |
@@ -102,7 +161,12 @@ pathdoc [--json] [--scope machine|user|all] [--shadows-only] [--no-color]
 | 1 | Audit ran, findings present |
 | 2 | Fatal error: registry unreadable, bad arguments |
 
-Matching the convention already used across this machine's tooling.
+Matching the convention already used across this machine's tooling. The code
+describes what was **reported**, not what the audit saw, so `--scope machine`
+exits 0 while the only dead entry is in the user scope. That keeps the flag
+composable in a script rather than a lie waiting to happen.
+
+A closed pipe is not an error. `pathdoc | head` exits 0.
 
 ## Verification
 

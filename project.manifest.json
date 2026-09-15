@@ -12,7 +12,14 @@
     "packageManagers": ["cargo"],
     "frameworks": [],
     "datastores": [],
-    "keyDependencies": ["winreg@=0.56.0"]
+    "keyDependencies": [
+      "winreg@=0.56.0",
+      "clap@=4.6.7",
+      "serde@=1.0.229",
+      "serde_json@=1.0.151",
+      "anstream@=1.0.0",
+      "anstyle@=1.0.14"
+    ]
   },
   "git": {
     "isRepo": true,
@@ -32,5 +39,5 @@
   ],
   "graduatedFrom": null,
   "tags": ["windows", "cli", "rust", "diagnostics", "first-project"],
-  "notes": "First Rust project on this machine, chosen as a workflow shakedown. Deliberately read-only in slice 1: it reports, it never writes PATH. Born from real PATH shadowing hit during machine provisioning on 2026-09-15. Slice 1 progress: registry reading and PATH composition done (winreg, chosen over the windows crate so the unsafe stays in the dependency); executable enumeration, shadow detection and output formatting still to come."
+  "notes": "First Rust project on this machine, chosen as a workflow shakedown. Deliberately read-only in slice 1: it reports, it never writes PATH. Born from real PATH shadowing hit during machine provisioning on 2026-09-15. Slice 1 progress: registry reading and PATH composition done (winreg, chosen over the windows crate so the unsafe stays in the dependency), plus the output layer - table, colour, and a versioned JSON contract documented in docs/SPEC.md. A GUI is a confirmed future consumer, so the serialisation shape is defined once in pathdoc-core behind a serde feature rather than mirrored in the front end. Remaining in slice 1: executable enumeration, PATHEXT handling, shadow detection, and the Unreadable finding."
 }

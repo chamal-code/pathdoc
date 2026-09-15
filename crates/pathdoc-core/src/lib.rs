@@ -4,11 +4,24 @@
 //! never prints. All formatting belongs to the front end, so that a GUI can
 //! consume the same core later without shelling out to a CLI and scraping text.
 //!
-//! See `docs/SPEC.md` for the behaviour this models.
+//! Serialisation is a different matter to formatting, and lives here behind the
+//! `serde` feature. The types below *are* the contract, whether a consumer links
+//! this library and gets Rust values or reads JSON from `pathdoc --json`. Keeping
+//! one definition of that shape is what stops the two from drifting apart. See
+//! [`JsonReport`] for the versioned envelope, and `docs/SPEC.md` for the field
+//! names it produces.
 
 mod compose;
 mod probe;
 mod registry;
+
+/// Version of the serialised report shape.
+///
+/// Bumped only for a change a consumer could break on: a field removed or
+/// renamed, an enum representation altered, or the meaning of an existing field
+/// changed. Adding a field, an enum variant, or a [`Capability`] is additive and
+/// does not bump it.
+pub const SCHEMA_VERSION: u32 = 1;
 
 /// Where a `PATH` entry came from.
 ///
@@ -16,6 +29,8 @@ mod registry;
 /// entries. That ordering is load-bearing: it is why a `Program Files` install
 /// outranks a copy vendored into some application's private folder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
 pub enum PathScope {
     /// `HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment`
     Machine,
@@ -33,15 +48,31 @@ pub enum PathScope {
 /// Worth distinguishing: `%USERPROFILE%\.cargo\bin` stored literally is not the
 /// same fact as the same path stored already expanded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ValueKind {
     /// `REG_SZ` — stored literally, no expansion.
+    #[cfg_attr(feature = "serde", serde(rename = "REG_SZ"))]
     Sz,
     /// `REG_EXPAND_SZ` — environment references expanded on read.
+    #[cfg_attr(feature = "serde", serde(rename = "REG_EXPAND_SZ"))]
     ExpandSz,
 }
 
 /// Something worth reporting about a single `PATH` entry.
+///
+/// Serialises as a discriminated union — `{"kind": "missing"}`, or
+/// `{"kind": "duplicate", "firstSeenAt": 0}` — so a typed consumer can switch on
+/// one field rather than probing for shapes.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "serde",
+    serde(
+        tag = "kind",
+        rename_all = "camelCase",
+        rename_all_fields = "camelCase"
+    )
+)]
 pub enum Finding {
     /// The directory does not exist.
     Missing,
@@ -60,8 +91,30 @@ pub enum Finding {
     Unreadable,
 }
 
+/// A class of analysis an audit run actually performed.
+///
+/// The point of this is to keep an empty result distinguishable from an absent
+/// one. An empty [`AuditReport::shadows`] means "nothing is shadowed" when
+/// [`Capability::ShadowDetection`] is listed, and "not computed" when it is not —
+/// and a consumer that cannot tell those apart will show a clean bill of health
+/// for work that never ran.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
+pub enum Capability {
+    /// `PATH` was read from both registry scopes and composed in the order
+    /// Windows resolves.
+    Composition,
+    /// Per-entry findings were evaluated.
+    EntryFindings,
+    /// Executables were enumerated and shadowing resolved.
+    ShadowDetection,
+}
+
 /// One directory on the composed `PATH`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
 pub struct PathEntry {
     /// Zero-based position in the composed order.
     pub index: usize,
@@ -80,6 +133,10 @@ pub struct PathEntry {
 impl PathEntry {
     /// The directory Windows actually resolves for this entry: the expansion
     /// where there was one, otherwise the raw value.
+    ///
+    /// Deliberately not a serialised field. It is `expanded ?? raw`, and a
+    /// derived field in the wire shape is a field that can contradict the two it
+    /// derives from.
     #[must_use]
     pub fn effective(&self) -> &str {
         self.expanded.as_deref().unwrap_or(&self.raw)
@@ -87,7 +144,9 @@ impl PathEntry {
 }
 
 /// One executable file found inside a `PATH` entry.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
 pub struct Occurrence {
     /// Index of the `PathEntry` that contains it.
     pub entry_index: usize,
@@ -99,7 +158,9 @@ pub struct Occurrence {
 }
 
 /// An executable name that exists in more than one `PATH` entry.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
 pub struct Shadowed {
     /// Lower-cased file stem, since Windows resolution is case-insensitive.
     pub stem: String,
@@ -109,12 +170,14 @@ pub struct Shadowed {
 }
 
 /// The result of one audit run.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AuditReport {
     /// Every entry on the composed `PATH`, in order.
     pub entries: Vec<PathEntry>,
     /// Executable names resolvable from more than one entry.
     pub shadows: Vec<Shadowed>,
+    /// What this run actually computed. See [`Capability`].
+    pub capabilities: Vec<Capability>,
 }
 
 impl AuditReport {
@@ -122,6 +185,46 @@ impl AuditReport {
     #[must_use]
     pub fn has_findings(&self) -> bool {
         self.entries.iter().any(|e| !e.findings.is_empty()) || !self.shadows.is_empty()
+    }
+
+    /// Whether this run performed a given class of analysis.
+    #[must_use]
+    pub fn computed(&self, capability: Capability) -> bool {
+        self.capabilities.contains(&capability)
+    }
+}
+
+/// The serialised form of an [`AuditReport`], carrying the schema version.
+///
+/// Separate from `AuditReport` so the in-memory model stays free of wire
+/// concerns, and so the version travels with the data rather than being
+/// something a front end remembers to add. `entries` and `shadows` may be a
+/// filtered subset of a report when a front end was asked to narrow the output;
+/// `index` remains the true composed index in every case, so a filtered list
+/// still says where each entry really sits.
+#[cfg(feature = "serde")]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JsonReport {
+    /// Value of [`SCHEMA_VERSION`] at the time of writing.
+    pub schema_version: u32,
+    /// What the run computed, copied from [`AuditReport::capabilities`].
+    pub capabilities: Vec<Capability>,
+    /// Composed `PATH` entries, possibly filtered.
+    pub entries: Vec<PathEntry>,
+    /// Shadowed executable names, possibly filtered.
+    pub shadows: Vec<Shadowed>,
+}
+
+#[cfg(feature = "serde")]
+impl From<AuditReport> for JsonReport {
+    fn from(report: AuditReport) -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION,
+            capabilities: report.capabilities,
+            entries: report.entries,
+            shadows: report.shadows,
+        }
     }
 }
 
@@ -158,7 +261,9 @@ impl std::error::Error for AuditError {}
 ///
 /// Composition and per-entry findings are implemented. Executable enumeration,
 /// `PATHEXT` handling, shadow detection and the [`Finding::Unreadable`] verdict
-/// are the next task, so [`AuditReport::shadows`] is always empty for now.
+/// are the next task, so [`AuditReport::shadows`] is always empty for now and
+/// [`Capability::ShadowDetection`] is deliberately absent from the returned
+/// capabilities.
 pub fn audit() -> Result<AuditReport, AuditError> {
     let machine = registry::read_machine_path()?;
     let user = registry::read_user_path()?;
@@ -175,16 +280,24 @@ pub fn audit() -> Result<AuditReport, AuditError> {
     Ok(AuditReport {
         entries,
         shadows: Vec::new(),
+        capabilities: vec![Capability::Composition, Capability::EntryFindings],
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{AuditReport, PathEntry, PathScope, audit};
+    use super::{AuditReport, Capability, PathEntry, PathScope, audit};
 
     #[test]
     fn empty_report_has_no_findings() {
         assert!(!AuditReport::default().has_findings());
+    }
+
+    #[test]
+    fn a_default_report_claims_to_have_computed_nothing() {
+        let report = AuditReport::default();
+        assert!(!report.computed(Capability::Composition));
+        assert!(!report.computed(Capability::ShadowDetection));
     }
 
     #[test]
@@ -214,6 +327,20 @@ mod tests {
                 for (position, entry) in report.entries.iter().enumerate() {
                     assert_eq!(entry.index, position);
                 }
+            }
+            Err(err) => panic!("audit failed: {err}"),
+        }
+    }
+
+    #[test]
+    fn audit_reports_what_it_did_and_did_not_compute() {
+        match audit() {
+            Ok(report) => {
+                assert!(report.computed(Capability::Composition));
+                assert!(report.computed(Capability::EntryFindings));
+                // Not yet built. An empty `shadows` must not read as clean.
+                assert!(!report.computed(Capability::ShadowDetection));
+                assert!(report.shadows.is_empty());
             }
             Err(err) => panic!("audit failed: {err}"),
         }
