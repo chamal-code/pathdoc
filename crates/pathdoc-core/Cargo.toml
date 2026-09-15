@@ -1,0 +1,13 @@
+[package]
+name = "pathdoc-core"
+description = "Read-only auditing of the Windows PATH: composition order, dead entries, and shadowed executables."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]

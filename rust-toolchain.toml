@@ -1,0 +1,7 @@
+# Pin the channel, not the patch.
+# An exact version such as "1.98.1" makes rustup keep a second toolchain of
+# roughly 1.3 GB even when it is identical to the stable already installed.
+# Measured on 2026-09-15; see ~/.kiro/steering/10-toolchain.md.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]

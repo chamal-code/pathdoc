@@ -1,0 +1,19 @@
+# Normalise line endings in the repository, LF in the working tree.
+# The machine's global git config is core.autocrlf=input, and these rules
+# keep that from mattering either way.
+* text=auto eol=lf
+
+*.rs    text eol=lf
+*.toml  text eol=lf
+*.md    text eol=lf
+*.json  text eol=lf
+*.yml   text eol=lf
+
+# Test fixtures must survive byte-for-byte. Never let git touch them:
+# several planned cases deliberately contain CRLF, lone CR, or NUL bytes.
+tests/fixtures/**       binary
+crates/**/tests/fixtures/**  binary
+
+# Binary documents
+*.docx  binary
+*.pdf   binary

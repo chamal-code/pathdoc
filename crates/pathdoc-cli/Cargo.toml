@@ -1,0 +1,18 @@
+[package]
+name = "pathdoc-cli"
+description = "Command-line front end for pathdoc-core."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "pathdoc"
+path = "src/main.rs"
+
+[dependencies]
+pathdoc-core = { path = "../pathdoc-core" }

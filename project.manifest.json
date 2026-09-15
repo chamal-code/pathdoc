@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "name": "project_path_doctor",
+  "kind": "project",
+  "purpose": "Windows PATH auditor that reports dead entries, duplicates and shadowed executables, resolving machine and user PATH in true composition order.",
+  "status": "active",
+  "created": "2026-09-15",
+  "lastReviewed": "2026-09-15",
+  "stack": {
+    "languages": ["Rust"],
+    "runtimes": ["rust@stable"],
+    "packageManagers": ["cargo"],
+    "frameworks": [],
+    "datastores": []
+  },
+  "git": {
+    "isRepo": true,
+    "remote": null,
+    "defaultBranch": "main"
+  },
+  "commands": {
+    "install": "cargo fetch",
+    "dev": "cargo run -p pathdoc-cli --",
+    "test": "cargo test",
+    "build": "cargo build --release"
+  },
+  "entryPoints": [
+    "crates/pathdoc-cli/src/main.rs",
+    "crates/pathdoc-core/src/lib.rs",
+    "docs/SPEC.md"
+  ],
+  "graduatedFrom": null,
+  "tags": ["windows", "cli", "rust", "diagnostics", "first-project"],
+  "notes": "First Rust project on this machine, chosen as a workflow shakedown. Deliberately read-only in slice 1: it reports, it never writes PATH. Born from real PATH shadowing hit during machine provisioning on 2026-09-15."
+}

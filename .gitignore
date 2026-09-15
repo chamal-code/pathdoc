@@ -1,0 +1,21 @@
+/target/
+**/target/
+
+# Rust
+*.pdb
+Cargo.lock.bak
+
+# Environments and secrets
+.venv/
+.env
+
+# Build output
+dist/
+build/
+
+# Logs
+*.log
+
+# OS noise
+Thumbs.db
+desktop.ini
