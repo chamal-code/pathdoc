@@ -179,6 +179,19 @@ PowerShell at test time; shadowing does not, and automating it is on the roadmap
   Prove such a test fails. Reintroduce the character, watch it go red, then take it
   back out. The 0.1.0 bug existed *alongside* a passing ASCII test, so "the test is
   green" was already established as worthless evidence here.
+- **Local consistency hides global rule violations, so audit by rule and not by
+  reading.** The reason those four em dashes survived review is that the `long_about`
+  string immediately above them already used ASCII hyphens. The file *looked*
+  considered, so nobody looked harder — but the care was in the string literal and the
+  rule was about the whole file. Nearby correctness is actively misleading evidence: it
+  is why a section reads as deliberate when only part of it was.
+
+  The defence is mechanical rather than attentive. When a rule covers a category — every
+  emitted string, every workflow file, every manifest — check the category by running
+  something over all of it, and do not let a well-formed neighbour stand in for the
+  members you did not check. The same shape appeared twice more in this project: a
+  licence declared in `Cargo.toml` with no files behind it, and a `check.yml` comment
+  claiming 19 skipped tests when it was 24. All three were locally plausible.
 - **Do not edit repository text with `Set-Content -Encoding utf8`.** Windows PowerShell
   5.1 writes a BOM, and `Get-Content -Raw` without `-Encoding UTF8` reads existing
   UTF-8 as ANSI — so a read-modify-write round trip both adds a BOM and turns every em

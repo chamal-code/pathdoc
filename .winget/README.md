@@ -8,30 +8,26 @@ repository, and these files are the copy that gets submitted there.
 Deliberately not wired into any workflow. Automating a submission that has not been
 made by hand once is premature, and the first one is where the fields get understood.
 
-## Current state: 0.1.1, incomplete on purpose
+## Current state: 0.1.1, complete and validated, not yet submitted
 
-**Nothing has been submitted to winget-pkgs yet.** `0.1.0` was prepared and then held:
-`--help` printed four em dashes as mojibake on a non-UTF-8 console, and a winget
-manifest pins an artifact URL and its hash, so shipping that would have cost a `0.1.1`
-release *plus* a second PR to a Microsoft repository to undo. Fixing first cost four
-characters.
+`winget validate` passes. All seven URLs answer 200, `InstallerSha256` matches the
+published artifact, and `RelativeFilePath` matches what is actually inside it. Nothing
+has gone to winget-pkgs yet; opening that PR is the owner's call.
 
-Two fields cannot be filled until the `v0.1.1` release exists, and they are set to
-placeholders that **fail `winget validate` on purpose**:
+**`0.1.0` was prepared and then held**, which is why the first submitted version is
+`0.1.1`. `--help` printed four em dashes as mojibake on a non-UTF-8 console. Ordinarily
+that would ride to the next release, but a winget manifest pins an artifact URL *and its
+hash*, so submitting it would have meant a `0.1.1` release plus a second PR to a
+Microsoft repository to undo. Fixing first cost four characters. **Check the emitted
+output of the binary before pinning it here** — a manifest is a commitment to a specific
+file, so the bar is higher than for a normal release.
 
-```
-ReleaseDate:     PENDING-RELEASE
-InstallerSha256: PENDING-RELEASE-COPY-FROM-PUBLISHED-SHA256SUMS-TXT-DO-NOT-COMPUTE
-```
-
-Leaving the previous version's real values in place would have been worse than useless:
-the manifest would validate cleanly while pointing at the wrong artifact. A placeholder
-that cannot validate is a tripwire rather than a footgun, and `winget validate` names
-both fields explicitly, so neither can be forgotten.
-
-The three tagged URLs have been moved to `v0.1.1` but **cannot be verified until the tag
-is pushed** — they will 404 until then. Re-run the URL check below once the release
-exists.
+While the release did not yet exist, `ReleaseDate` and `InstallerSha256` were held as
+placeholders that **deliberately failed `winget validate`**. Do the same next time.
+Carrying the previous version's real values forward would have been strictly worse: the
+manifest would have validated cleanly while pointing at the wrong artifact. A value that
+cannot validate is a tripwire; a stale-but-plausible value is a footgun. `winget
+validate` names both fields, so neither can be quietly forgotten.
 
 ## Layout
 
