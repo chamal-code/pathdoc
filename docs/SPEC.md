@@ -428,7 +428,7 @@ Deliberately out of slice 1, in no particular order:
 
 1. **Shell-level masking.** Report when a PATH executable is unreachable because
    the shell resolves the name to an alias or function first. `diff` and `fc` are
-   live examples. Needs per-shell introspection, so it is its own slice.
+   live examples. Design settled below; not implemented.
 2. **App Execution Aliases.** Decode `WindowsApps` reparse points to the owning
    package, so a Store stub is named rather than merely flagged. Slice 1 reports
    *that* a file is a reparse point but never *what* it points at, by design —
@@ -437,14 +437,66 @@ Deliberately out of slice 1, in no particular order:
    and has been extracted into the `winenv` crate ready for it. That crate is the
    dependency to take — **not** `pathdoc-core`, which would drag `PathEntry`,
    `Resolved` and `AuditReport` into a tool that has no use for any of them. See
-   the crate boundary below. Still to decide when the second tool exists: whether
-   `winenv` moves to its own repository or is consumed from this one by path or git,
-   since the trunk's convention is one repository per project.
+   the crate boundaries below.
+
+   **`winenv` stays in this repository.** Decided, so nobody re-opens it: no
+   separate repo, no crates.io. Separate repositories would mean git-revision
+   pinning and a cross-repo version bump for every change to a crate that will churn
+   while its second consumer is still being written — real cost for a solo
+   developer, no offsetting benefit when everything goes public together anyway.
+   Publishing would commit to API stability for outside consumers who do not exist.
+
+   The direction, so nothing is designed for the wrong future: **when the env-var
+   tool exists, this repository becomes the toolkit workspace and the tools join it
+   as members.** Not a third repo, not three repos.
+
+   That cuts against the trunk's one-repository-per-project convention. The
+   convention predates a shared-library toolkit being the plan, so the convention
+   bends rather than the architecture, and the trunk amends its own steering when the
+   restructure actually happens. Do not pre-empt that.
 4. **Fix mode.** Only after backup, dry-run and confirmation are designed properly.
    Note the `SetEnvironmentVariable` trap recorded under Verification before
    writing a line of it.
 5. **Automated shadowing cross-check** against `Get-Command -All`, as described
    above.
+
+## Next slice: shell-level masking, design settled
+
+Detecting the clash is easy. Learning what a shell masks is not, and the choice
+shapes the output contract, so it is settled here before any code.
+
+### Ask a live shell, and say which shell and whether its profile loaded
+
+The alternative is a static table of known built-ins. That is fast and cannot see a
+user's own aliases at all, and it goes stale. Rejected.
+
+Asking a live shell is accurate, shell-specific and slow, and carries a subtlety
+that decides the shape of the finding: **`diff` and `fc` are built-in aliases,
+present even under `-NoProfile`, while a user's own alias exists only once the
+profile loads.** So "was the profile loaded" changes the answer, and both answers
+are legitimate for different questions.
+
+That is the same problem as process-only entries, and it gets the same treatment:
+report the mechanism and the context, never a bare verdict. The vocabulary already
+exists — this is `live_winner` versus `fresh_winner` again, one layer up — and it
+should be reused rather than a second one invented. A masking finding therefore
+carries which interpreter was asked and whether its profile was loaded, and a
+consumer that cares can tell "masked in your interactive shell" from "masked in any
+shell".
+
+The same rule applies as everywhere else in this spec: **do not bake counts.** How
+many names a shell masks is a property of that shell's configuration, not of the
+machine.
+
+### Scope, stated rather than left open
+
+| In scope | Out of scope, and why |
+| --- | --- |
+| PowerShell aliases | `cmd.exe` doskey macros — per-session, not discoverable from outside the session, and nothing on this machine uses them |
+| PowerShell functions, which mask a name just as an alias does | Bash and other POSIX shells, until something here actually runs one as a login shell |
+
+Functions are in scope deliberately: leaving them out would report `diff` and miss a
+function called `git`, which is the more damaging case.
 
 ## Crate boundaries
 

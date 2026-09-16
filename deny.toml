@@ -30,8 +30,19 @@ wildcards = "deny"
 allow-wildcard-paths = true
 
 [advisories]
-# A yanked version is a decision somebody made for a reason.
+# A yanked version is a decision somebody made for a reason. Default is "warn".
 yanked = "deny"
+# Both of these accept all | workspace | transitive | none, and both are set
+# explicitly because a narrow default would quietly weaken the gate.
+#
+# `unmaintained` already defaults to "all"; stated anyway so it cannot drift under
+# us in a future release.
+unmaintained = "all"
+# `unsound` defaults to "workspace", which only fails on direct dependencies. This
+# workspace has four direct dependencies and around thirty transitive ones, so the
+# default would have ignored almost the entire tree — and unsoundness in something
+# we pull in indirectly still compiles into our binary.
+unsound = "all"
 
 [sources]
 # Everything must come from crates.io or a path inside this workspace.

@@ -26,6 +26,13 @@ on `winenv`, **not** on `pathdoc-core`, which would drag `PathEntry`, `Resolved`
 `AuditReport` into a tool with no use for them. If something PATH-aware starts
 creeping into `winenv`, it belongs in `pathdoc-core` instead.
 
+`winenv` **stays in this repository** — decided, not open. No separate repo, no
+crates.io. When the env-var tool exists, this repository becomes the toolkit
+workspace and the tools join it as members. That bends the trunk's
+one-repository-per-project convention, which predates a shared-library toolkit being
+the plan; the trunk amends its own steering when the restructure happens, so do not
+pre-empt it and do not "fix" the layout to match the old rule.
+
 **2. This tool is read-only.** No registry writes, no PATH edits, no fix mode,
 not even behind a flag. A tool that audits PATH and a tool that edits PATH have
 very different blast radii, and the second one needs a design for backups,
@@ -131,10 +138,19 @@ PowerShell at test time; shadowing does not, and automating it is on the roadmap
   vendored MSYS shell.** It prepends `/mingw64/bin` and `/usr/bin`, so a recipe sees
   a different `PATH` from the shell that invoked it — with a second `git.exe` and
   `bash.exe` ahead of the real ones. It broke two acceptance assertions the first
-  time `just check` ran. The `justfile` now pins
-  `set shell := ["powershell.exe", "-NoProfile", "-Command"]`. Do not remove that
-  line, and be suspicious of any tool that runs commands for you on this machine:
-  the vendored `sh` is first on `PATH` and it rewrites the environment.
+  time `just check` ran. The `justfile` pins
+  `set windows-shell := ["powershell.exe", "-NoProfile", "-Command"]`. Do not remove
+  that line, and be suspicious of any tool that runs commands for you on this
+  machine: the vendored `sh` is first on `PATH` and it rewrites the environment.
+  `just probe-path` prints what a recipe actually sees, which is how this was found.
+- **`set windows-shell`, never `set shell`.** `shell` overrides every platform, and
+  the reason for pinning PowerShell is Windows-specific. `fmt-check` and `deny` are
+  platform-independent, so a Linux runner in an OS matrix would try to spawn
+  `powershell.exe` and fail.
+- **Explanatory comments go above a recipe, not inside it.** `just` echoes each line
+  of a recipe body, so an in-body `#` gets printed as though it were output. Put the
+  long explanation above, then a single-line doc comment last, since `--list` shows
+  only the final comment line.
 - **Never assert a count that a harness can change.** Anything derived from the
   process `PATH` — how many entries are unseen, how many copies of a name exist — is
   a fact about the observing process. Assert relationships instead:
