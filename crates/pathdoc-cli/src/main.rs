@@ -48,7 +48,9 @@ fn main() -> ExitCode {
 
 /// Run the audit and write it out. `Ok(true)` means findings were reported.
 fn run(options: &Options) -> Result<bool, Box<dyn std::error::Error>> {
-    let report = pathdoc_core::audit()?;
+    let report = pathdoc_core::audit_with(
+        &pathdoc_core::AuditOptions::default().with_shell_scan(options.shell_scan()),
+    )?;
 
     let entries: Vec<&PathEntry> = report
         .entries
@@ -150,6 +152,7 @@ mod tests {
         report.capabilities.push(Capability::ShadowDetection);
         report.executables = vec![Resolved {
             stem: "git".to_owned(),
+            intercept: None,
             occurrences: vec![occurrence(0, "git.exe"), occurrence(1, "git.exe")],
         }];
         report
@@ -216,6 +219,7 @@ mod tests {
         clean.capabilities.push(Capability::ShadowDetection);
         clean.executables = vec![Resolved {
             stem: "gzip".to_owned(),
+            intercept: None,
             occurrences: vec![occurrence(0, "gzip.exe")],
         }];
         let entries: Vec<&PathEntry> = clean.entries.iter().collect();
@@ -252,6 +256,7 @@ mod tests {
         report.capabilities.push(Capability::ShadowDetection);
         report.executables = vec![Resolved {
             stem: "gzip".to_owned(),
+            intercept: None,
             occurrences: vec![occurrence(0, "gzip.exe")],
         }];
         let entries: Vec<&PathEntry> = report.entries.iter().collect();

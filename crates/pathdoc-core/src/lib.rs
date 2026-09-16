@@ -13,8 +13,57 @@
 
 mod compose;
 mod executables;
+mod masking;
 mod probe;
 mod registry;
+
+/// Whether, and how, to ask a shell what it masks.
+///
+/// See [`Intercept`] for why loading a profile is a choice rather than a default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShellScan {
+    /// Ask an interpreter.
+    ///
+    /// `profile: false` has no side effects. `profile: true` makes the interpreter
+    /// load the user profile, which means **this tool executes arbitrary user code**
+    /// as a side effect of producing a read-only report. It is the only way to see a
+    /// user's own aliases, and it is opt-in for exactly that reason.
+    Ask {
+        /// Whether to let the interpreter load its user profile.
+        profile: bool,
+    },
+    /// Do not ask. No process is spawned, and [`Capability::ShellMasking`] is absent
+    /// from the report, so a `null` intercept reads as "not checked".
+    Skip,
+}
+
+impl Default for ShellScan {
+    /// Ask, without loading a profile: useful, and free of side effects.
+    fn default() -> Self {
+        Self::Ask { profile: false }
+    }
+}
+
+/// How to run an audit.
+///
+/// [`audit`] uses the defaults. Non-exhaustive, so build it from
+/// [`AuditOptions::default`] and the `with_` methods rather than a struct literal;
+/// that way adding an option later is not a breaking change for callers.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct AuditOptions {
+    /// Whether to ask a shell what it masks. Defaults to asking without a profile.
+    pub shell_scan: ShellScan,
+}
+
+impl AuditOptions {
+    /// Set whether, and how, to ask a shell what it masks.
+    #[must_use]
+    pub fn with_shell_scan(mut self, shell_scan: ShellScan) -> Self {
+        self.shell_scan = shell_scan;
+        self
+    }
+}
 
 /// Version of the serialised report shape.
 ///
@@ -38,7 +87,14 @@ mod registry;
 /// directory and a registry one. There is no single right answer — a running shell
 /// and a freshly started process resolve differently — so both are now reported
 /// rather than one being guessed at.
-pub const SCHEMA_VERSION: u32 = 3;
+///
+/// `4` added [`Resolved::intercept`] and [`Capability::ShellMasking`]. Purely
+/// additive: nothing was removed or renamed. Shell-level masking extends the
+/// per-name records rather than becoming a [`Finding`] or a section of its own,
+/// because a `Finding` describes a directory and masking describes none — the entry
+/// holding `sc.exe` is perfectly healthy — and because masking is the same question
+/// as shadowing one layer up. Both answer "if I type this, what runs".
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// Where a `PATH` entry came from.
 ///
@@ -126,6 +182,55 @@ pub enum Capability {
     EntryFindings,
     /// Executables were enumerated and shadowing resolved.
     ShadowDetection,
+    /// A shell was asked what it masks. Without this, a `null`
+    /// [`Resolved::intercept`] means "not checked" rather than "not masked" — the
+    /// scan can fail for want of an interpreter, or be switched off outright.
+    ShellMasking,
+}
+
+/// The kind of shell construct that answers to a name before `PATH` is consulted.
+///
+/// Both are reported because both mask, and leaving functions out would name `diff`
+/// while missing a function called `git` — the more damaging case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
+pub enum ShellConstruct {
+    /// An alias, such as `sc` for `Set-Content`.
+    Alias,
+    /// A function, such as the built-in `more`.
+    Function,
+}
+
+/// Something a shell resolves a name to **before** it ever searches `PATH`.
+///
+/// Shell-layer only, and the distinction matters: anything that spawns a process by
+/// searching `PATH` — a build script, another program, `Start-Process` — still gets
+/// the file. This says "if you type this name interactively, you get something else",
+/// not "the file is unreachable".
+///
+/// Every record names the interpreter that answered by **absolute path**, not by
+/// shell name, because the verdict genuinely differs between interpreters on one
+/// machine: `curl` is an alias for `Invoke-WebRequest` in Windows PowerShell 5.1 and
+/// is the real `curl.exe` in PowerShell 7. A report saying only "PowerShell" is
+/// ambiguous exactly where it matters.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
+pub struct Intercept {
+    /// Whether an alias or a function answers to the name.
+    pub construct: ShellConstruct,
+    /// What an alias points at, for example `Set-Content`. `None` for a function,
+    /// which is its own definition rather than a redirection to something else.
+    pub resolves_to: Option<String>,
+    /// Absolute path of the interpreter that was asked.
+    pub interpreter: String,
+    /// Whether that interpreter loaded its user profile.
+    ///
+    /// Load-bearing: built-ins such as `diff` and `fc` are present without a
+    /// profile, while a user's own alias exists only once one is loaded. Both
+    /// answers are legitimate, and only one of them runs arbitrary user code.
+    pub profile_loaded: bool,
 }
 
 /// One directory on the composed `PATH`.
@@ -224,6 +329,11 @@ pub struct Resolved {
     /// So `occurrences[0]` is what this process runs — see [`Resolved::live_winner`]
     /// for the version that says so honestly when nothing here is live at all.
     pub occurrences: Vec<Occurrence>,
+    /// What a shell resolves this name to instead, if anything does.
+    ///
+    /// `None` means "nothing masks it" only when [`Capability::ShellMasking`] is
+    /// listed on the report. Otherwise it means the scan did not run.
+    pub intercept: Option<Intercept>,
 }
 
 impl Resolved {
@@ -272,6 +382,12 @@ impl Resolved {
     #[must_use]
     pub fn is_shadowed(&self) -> bool {
         self.occurrences.len() > 1
+    }
+
+    /// Whether a shell answers to this name before `PATH` is searched.
+    #[must_use]
+    pub fn is_intercepted(&self) -> bool {
+        self.intercept.is_some()
     }
 
     /// Whether every occurrence sits in the same directory, making this a contest
@@ -392,7 +508,19 @@ impl std::error::Error for AuditError {}
 ///
 /// Then enumerates the executables in each surviving directory and works out
 /// which copy of each name Windows would actually run.
+///
+/// Uses [`AuditOptions::default`], which asks a shell what it masks without loading
+/// a user profile. Use [`audit_with`] to change that.
 pub fn audit() -> Result<AuditReport, AuditError> {
+    audit_with(&AuditOptions::default())
+}
+
+/// Audit the Windows `PATH` with explicit options.
+///
+/// # Errors
+///
+/// As [`audit`].
+pub fn audit_with(options: &AuditOptions) -> Result<AuditReport, AuditError> {
     let machine = registry::read_machine_path()?;
     let user = registry::read_user_path()?;
     let process = std::env::var("PATH").ok();
@@ -408,16 +536,25 @@ pub fn audit() -> Result<AuditReport, AuditError> {
     // enumerating, and enumeration is what can add `Unreadable`.
     probe::annotate(&mut entries);
     let extensions = executables::extensions(&lookup);
-    let executables = executables::enumerate(&mut entries, &extensions);
+    let mut executables = executables::enumerate(&mut entries, &extensions);
+
+    // After enumeration, because the interpreter to ask is found in its results
+    // rather than by a second, unaudited `PATH` search.
+    let masking_ran = masking::scan(&mut executables, options.shell_scan);
+
+    let mut capabilities = vec![
+        Capability::Composition,
+        Capability::EntryFindings,
+        Capability::ShadowDetection,
+    ];
+    if masking_ran {
+        capabilities.push(Capability::ShellMasking);
+    }
 
     Ok(AuditReport {
         entries,
         executables,
-        capabilities: vec![
-            Capability::Composition,
-            Capability::EntryFindings,
-            Capability::ShadowDetection,
-        ],
+        capabilities,
     })
 }
 
@@ -553,10 +690,12 @@ mod tests {
                 file_name: "gzip.exe".to_owned(),
                 is_reparse_point: false,
             }],
+            intercept: None,
         };
 
         assert!(!resolved.is_shadowed());
         assert!(!resolved.is_pathext_only());
+        assert!(!resolved.is_intercepted());
         assert!(!resolved.winner_depends_on_context());
         assert_eq!(
             resolved
@@ -585,6 +724,7 @@ mod tests {
         let resolved = Resolved {
             stem: "powercfg".to_owned(),
             occurrences: vec![occurrence("powercfg.exe"), occurrence("powercfg.cpl")],
+            intercept: None,
         };
 
         assert!(resolved.is_shadowed());
@@ -617,6 +757,7 @@ mod tests {
         let resolved = Resolved {
             stem: "node".to_owned(),
             occurrences: vec![shim, registry],
+            intercept: None,
         };
 
         assert_eq!(

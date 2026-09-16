@@ -41,8 +41,8 @@ pub(crate) fn write_json(
 mod tests {
     use super::write_json;
     use pathdoc_core::{
-        AuditReport, Capability, Finding, JsonReport, Occurrence, PathEntry, PathScope, Resolved,
-        ValueKind,
+        AuditReport, Capability, Finding, Intercept, JsonReport, Occurrence, PathEntry, PathScope,
+        Resolved, ShellConstruct, ValueKind,
     };
 
     fn render(report: &AuditReport, shadows_only: bool) -> String {
@@ -110,7 +110,7 @@ mod tests {
     fn the_envelope_carries_the_schema_version_and_capabilities() {
         let value = parse(&render(&sample(), false));
 
-        assert_eq!(value["schemaVersion"], 3);
+        assert_eq!(value["schemaVersion"], 4);
         assert_eq!(
             value["capabilities"],
             serde_json::json!(["composition", "entryFindings"])
@@ -191,6 +191,7 @@ mod tests {
         report.capabilities.push(Capability::ShadowDetection);
         report.executables = vec![Resolved {
             stem: "git".to_owned(),
+            intercept: None,
             occurrences: vec![Occurrence {
                 entry_index: 0,
                 scope: PathScope::Machine,
@@ -236,6 +237,7 @@ mod tests {
         report.capabilities.push(Capability::ShadowDetection);
         report.executables = vec![Resolved {
             stem: "node".to_owned(),
+            intercept: None,
             occurrences: vec![
                 Occurrence {
                     entry_index: 2,
@@ -288,6 +290,7 @@ mod tests {
         report.capabilities.push(Capability::ShadowDetection);
         report.executables = vec![Resolved {
             stem: "gzip".to_owned(),
+            intercept: None,
             occurrences: vec![Occurrence {
                 entry_index: 17,
                 scope: PathScope::User,
@@ -308,11 +311,108 @@ mod tests {
     }
 
     #[test]
+    fn an_intercept_is_camel_case_and_names_the_interpreter_absolutely() {
+        let mut report = sample();
+        report.capabilities.push(Capability::ShadowDetection);
+        report.capabilities.push(Capability::ShellMasking);
+        report.executables = vec![Resolved {
+            stem: "sc".to_owned(),
+            intercept: Some(Intercept {
+                construct: ShellConstruct::Alias,
+                resolves_to: Some("Set-Content".to_owned()),
+                interpreter: r"C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe"
+                    .to_owned(),
+                profile_loaded: false,
+            }),
+            occurrences: vec![Occurrence {
+                entry_index: 0,
+                scope: PathScope::Machine,
+                process_position: Some(1),
+                directory: r"C:\WINDOWS\system32".to_owned(),
+                file_name: "sc.exe".to_owned(),
+                is_reparse_point: false,
+            }],
+        }];
+
+        let value = parse(&render(&report, false));
+        let intercept = &value["executables"][0]["intercept"];
+
+        assert_eq!(intercept["construct"], "alias");
+        assert_eq!(intercept["resolvesTo"], "Set-Content");
+        // Absolute path, not a shell name: the verdict differs between interpreters,
+        // so "PowerShell" would be ambiguous exactly where it matters.
+        assert_eq!(
+            intercept["interpreter"],
+            r"C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe"
+        );
+        assert_eq!(intercept["profileLoaded"], false);
+    }
+
+    #[test]
+    fn a_function_intercept_has_a_null_target() {
+        let mut report = sample();
+        report.capabilities.push(Capability::ShellMasking);
+        report.executables = vec![Resolved {
+            stem: "more".to_owned(),
+            intercept: Some(Intercept {
+                construct: ShellConstruct::Function,
+                resolves_to: None,
+                interpreter: r"C:\WINDOWS\powershell.exe".to_owned(),
+                profile_loaded: true,
+            }),
+            occurrences: Vec::new(),
+        }];
+
+        let intercept = parse(&render(&report, false))["executables"][0]["intercept"].clone();
+
+        assert_eq!(intercept["construct"], "function");
+        // A function is its own definition, so `string | null` and not a fake target.
+        assert!(intercept.get("resolvesTo").is_some());
+        assert!(intercept["resolvesTo"].is_null());
+        assert_eq!(intercept["profileLoaded"], true);
+    }
+
+    #[test]
+    fn a_null_intercept_is_distinguishable_from_an_unchecked_scan() {
+        // The whole reason ShellMasking is a capability. Same shape as the shadow
+        // case, and the mistake it prevents is reporting "nothing masks this" when
+        // nothing was asked.
+        let unchecked = parse(&render(&sample(), false));
+        assert!(
+            !unchecked["capabilities"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|capability| capability == "shellMasking"),
+            "a run that did not scan must not claim shellMasking"
+        );
+
+        let mut scanned = sample();
+        scanned.capabilities.push(Capability::ShellMasking);
+        scanned.executables = vec![Resolved {
+            stem: "gzip".to_owned(),
+            intercept: None,
+            occurrences: Vec::new(),
+        }];
+        let value = parse(&render(&scanned, false));
+
+        assert!(
+            value["capabilities"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|capability| capability == "shellMasking")
+        );
+        // Now, and only now, does a null intercept mean "nothing masks it".
+        assert!(value["executables"][0]["intercept"].is_null());
+    }
+
+    #[test]
     fn shadows_only_empties_the_entries_without_removing_the_field() {
         let value = parse(&render(&sample(), true));
 
         assert_eq!(value["entries"], serde_json::json!([]));
-        assert_eq!(value["schemaVersion"], 3);
+        assert_eq!(value["schemaVersion"], 4);
     }
 
     #[test]

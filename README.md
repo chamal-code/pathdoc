@@ -39,6 +39,9 @@ Slice 1 complete. All three questions above are answered:
   ones decided by `PATHEXT` rather than `PATH`, which is the case people miss
 - reparse points reported rather than followed, so a Store alias stub stays
   distinguishable from a real binary
+- shell-level masking: names a PowerShell alias or function answers to before `PATH`
+  is searched at all. 24 of them here, including `sc` hiding `sc.exe`, the Service
+  Control tool
 - table output with colour, and `--json` against a versioned contract
 
 On the machine it was written for that is around a thousand executable names across
@@ -177,10 +180,27 @@ Shadowed executables  (48 of 1039 names)
     wins    #28  C:\Users\...\fnm_multishells\20244_1789497930171\corepack.cmd
     unseen  #23  C:\Users\...\fnm\aliases\default\corepack.cmd
     note    a new process would run C:\Users\...\fnm\aliases\default\corepack.cmd
+  sc
+    intercept  alias -> Set-Content
+    wins    #0   C:\WINDOWS\system32\sc.exe
   winrm  one directory, decided by PATHEXT order
     wins    #0   C:\WINDOWS\system32\winrm.cmd
     hidden  #0   C:\WINDOWS\system32\winrm.vbs
 ```
+
+`intercept` is the shell layer: PowerShell resolves alias, then function, then cmdlet,
+then external file, so typing `sc` never reaches `sc.exe` — the Service Control tool —
+however healthy that directory is. It is **shell-layer only**: anything spawning a
+process by `PATH` search still gets the file. The report says which interpreter
+answered, by absolute path, because the verdict differs between them: `curl` is an
+alias for `Invoke-WebRequest` in Windows PowerShell 5.1 and the real `curl.exe` in
+PowerShell 7.
+
+Masking never affects the exit code. `diff` resolving to `Compare-Object` is
+intentional design, and something is masked on every Windows machine.
+`--shell-scan off` skips the scan; `--shell-scan profile` also loads your profile,
+which is the only way to see your own aliases and means this tool executes your
+profile code, so it is opt-in.
 
 `LIVE` is the position in the current process's `PATH`; `-` means the running
 process cannot see that directory at all. `IDX` is the composed registry position,
@@ -214,25 +234,25 @@ stays because a normalised fixture is a silently meaningless test.
 
 ## Testing
 
-136 tests, in three groups:
+159 tests, in three groups:
 
 - **Unit tests**, portable. Every input is explicit, including the environment
   lookup, so no machine's layout leaks into the logic.
 - **Contract tests** in `json.rs`, pinning every JSON field name and enum tag, so
   breaking the contract a GUI depends on breaks a test.
-- **`tests/this_machine.rs`**, 19 acceptance tests. Deliberately machine-specific:
+- **`tests/this_machine.rs`**, 23 acceptance tests. Deliberately machine-specific:
   they describe the registry of the machine this was written on. Composition order is
   cross-checked at run time against
   `[Environment]::GetEnvironmentVariable('Path', ...)` rather than hard-coded.
   Volatile counts sit in one marked block at the top; everything else is keyed on
   directory names so installing something does not invalidate them.
 
-### If you have cloned this, 19 tests will skip, and that is correct
+### If you have cloned this, 23 tests will skip, and that is correct
 
 ```
 cargo test
 ...
-test result: ok. 0 passed; 0 failed; 19 ignored
+test result: ok. 0 passed; 0 failed; 23 ignored
 ```
 
 Those are the machine-specific ones. They carry `#[ignore]` precisely so that a

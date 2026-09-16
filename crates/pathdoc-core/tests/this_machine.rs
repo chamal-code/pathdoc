@@ -48,7 +48,8 @@
 use std::process::Command;
 
 use pathdoc_core::{
-    AuditReport, Capability, Finding, PathEntry, PathScope, Resolved, ValueKind, audit,
+    AuditOptions, AuditReport, Capability, Finding, PathEntry, PathScope, Resolved, ShellConstruct,
+    ShellScan, ValueKind, audit, audit_with,
 };
 
 // ---------------------------------------------------------------------------
@@ -739,4 +740,121 @@ fn enumeration_ran_and_nothing_on_this_path_refused_to_open() {
         .map(PathEntry::effective)
         .collect();
     assert!(unreadable.is_empty(), "unreadable: {unreadable:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Shell-level masking. Windows PowerShell resolves alias, then function, then
+// cmdlet, then external file, so a built-in alias hides an executable at a layer
+// PATH analysis cannot see.
+//
+// Relationships, not counts: how many names a shell masks is a property of that
+// shell's configuration, and a profile would add the user's own aliases. The
+// specific names below are Windows built-ins, present without a profile.
+// ---------------------------------------------------------------------------
+
+#[test]
+#[ignore = "machine-specific: see `just test-machine`"]
+fn the_shell_masks_real_system32_tools() {
+    let report = report();
+
+    assert!(
+        report.computed(Capability::ShellMasking),
+        "the default audit should have asked a shell what it masks"
+    );
+
+    // `sc` is the one worth knowing about: `sc.exe` is the Service Control tool, and
+    // typing `sc` in PowerShell writes a file instead.
+    for (stem, target) in [
+        ("sc", "Set-Content"),
+        ("where", "Where-Object"),
+        ("fc", "Format-Custom"),
+        ("curl", "Invoke-WebRequest"),
+    ] {
+        let resolved = resolved(&report, stem);
+        let Some(intercept) = &resolved.intercept else {
+            panic!("`{stem}` is a built-in PowerShell alias and should be reported as masked")
+        };
+
+        assert_eq!(intercept.construct, ShellConstruct::Alias);
+        assert_eq!(intercept.resolves_to.as_deref(), Some(target));
+        // Recorded by absolute path, because the answer differs between
+        // interpreters: `curl` is this alias under Windows PowerShell 5.1 and the
+        // real curl.exe under PowerShell 7.
+        assert!(
+            intercept
+                .interpreter
+                .to_lowercase()
+                .ends_with("powershell.exe"),
+            "interpreter was {:?}",
+            intercept.interpreter
+        );
+        assert!(
+            intercept.interpreter.contains('\\'),
+            "the interpreter must be an absolute path, got {:?}",
+            intercept.interpreter
+        );
+        // The default scan has no side effects.
+        assert!(!intercept.profile_loaded);
+    }
+}
+
+#[test]
+#[ignore = "machine-specific: see `just test-machine`"]
+fn a_function_masks_more_com() {
+    let report = report();
+    let more = resolved(&report, "more");
+
+    // `more.com` is a real file in system32, and `more` is a built-in function.
+    assert_present_in(more, r"\WINDOWS\system32", "more.com");
+
+    let Some(intercept) = &more.intercept else {
+        panic!("`more` is a built-in function and should be reported as masked")
+    };
+    assert_eq!(intercept.construct, ShellConstruct::Function);
+    // A function is its own definition, so there is nothing to point at.
+    assert_eq!(intercept.resolves_to, None);
+}
+
+#[test]
+#[ignore = "machine-specific: see `just test-machine`"]
+fn masking_is_reported_for_names_nothing_else_is_wrong_with() {
+    let report = report();
+
+    // The reason this extends the per-name records rather than becoming a Finding:
+    // the directory holding sc.exe is entirely healthy, and masking says nothing
+    // about any directory.
+    let sc = resolved(&report, "sc");
+    assert!(sc.is_intercepted());
+
+    let Some(winner) = sc.fresh_winner() else {
+        panic!("sc.exe resolves from nowhere")
+    };
+    let entry = &report.entries[winner.entry_index];
+    assert!(
+        entry.findings.is_empty(),
+        "the entry holding sc.exe should be healthy, got {:?}",
+        entry.findings
+    );
+}
+
+#[test]
+#[ignore = "machine-specific: see `just test-machine`"]
+fn turning_the_scan_off_reports_unknown_rather_than_nothing() {
+    let report = match audit_with(&AuditOptions::default().with_shell_scan(ShellScan::Skip)) {
+        Ok(report) => report,
+        Err(err) => panic!("audit failed: {err}"),
+    };
+
+    // Nothing was asked, so nothing may be claimed.
+    assert!(!report.computed(Capability::ShellMasking));
+    for resolved in &report.executables {
+        assert!(
+            resolved.intercept.is_none(),
+            "`{}` reports an intercept from a scan that never ran",
+            resolved.stem
+        );
+    }
+    // And the rest of the audit is unaffected.
+    assert!(report.computed(Capability::ShadowDetection));
+    assert!(!report.executables.is_empty());
 }

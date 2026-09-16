@@ -169,8 +169,14 @@ searchable view want different amounts of the same audit.
 Flags:
 
 ```
-pathdoc [--json] [--scope machine|user|all] [--shadows-only] [--fail-on-shadow] [--no-color]
+pathdoc [--json] [--scope machine|user|all] [--shadows-only] [--fail-on-shadow]
+        [--shell-scan off|no-profile|profile] [--no-color]
 ```
+
+`--shell-scan` defaults to `no-profile`, which sees built-in aliases and functions and
+has no side effects. `profile` is the only way to see a user's own aliases and makes
+this tool **execute arbitrary user code** while producing a read-only report, so it is
+opt-in. `off` spawns nothing.
 
 `--scope` and `--shadows-only` filter what is **reported**. They never change how
 `PATH` is composed, and entries keep the index they hold in the full composed
@@ -190,8 +196,8 @@ library and one that parses this output cannot drift apart.
 
 ```json
 {
-  "schemaVersion": 3,
-  "capabilities": ["composition", "entryFindings", "shadowDetection"],
+  "schemaVersion": 4,
+  "capabilities": ["composition", "entryFindings", "shadowDetection", "shellMasking"],
   "entries": [
     {
       "index": 0,
@@ -205,14 +211,20 @@ library and one that parses this output cannot drift apart.
   ],
   "executables": [
     {
-      "stem": "git",
+      "stem": "sc",
+      "intercept": {
+        "construct": "alias",
+        "resolvesTo": "Set-Content",
+        "interpreter": "C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+        "profileLoaded": false
+      },
       "occurrences": [
         {
-          "entryIndex": 7,
+          "entryIndex": 0,
           "scope": "machine",
-          "processPosition": 8,
-          "directory": "C:\\Program Files\\Git\\cmd",
-          "fileName": "git.exe",
+          "processPosition": 1,
+          "directory": "C:\\WINDOWS\\system32",
+          "fileName": "sc.exe",
           "isReparsePoint": false
         }
       ]
@@ -261,10 +273,18 @@ Rules the shape follows:
 - `executables` is **never** filtered by `--scope`. Which copy of a name wins is
   decided across the whole `PATH`, so a scope-narrowed answer would be wrong
   rather than merely narrower.
+- `intercept` is what a shell answers to that name **before `PATH` is searched**, or
+  `null`. `construct` is `alias` or `function`; `resolvesTo` is an alias's target and
+  `null` for a function, which is its own definition rather than a redirection;
+  `interpreter` is an **absolute path**, never a shell name, because the verdict
+  genuinely differs between interpreters on one machine — `curl` is an alias in
+  Windows PowerShell 5.1 and the real `curl.exe` in PowerShell 7. A `null` intercept
+  means "nothing masks it" only when `shellMasking` is in `capabilities`.
 - `capabilities` says what the run actually computed. **An empty `executables`
   means "nothing found" only when `shadowDetection` is listed; otherwise it means
-  "not computed".** Without this a consumer shows a clean bill of health for work
-  that never ran, which is worse than showing nothing.
+  "not computed".** The same applies to a `null` `intercept` and `shellMasking`.
+  Without this a consumer shows a clean bill of health for work that never ran, which
+  is worse than showing nothing.
 - `schemaVersion` bumps only on a breaking change: a field removed or renamed, an
   enum representation altered, or an existing field's meaning changed. Adding a
   field, a variant, or a capability is additive and does not bump it.
@@ -283,6 +303,15 @@ exactly the kind of fact this tool exists to surface.
 
 So the report carries every name it found and a consumer filters. `shadows` was
 the wrong shape, not a wrong implementation of the right shape.
+
+#### Why schema 4 added `intercept`
+
+Shell-level masking. Purely additive — nothing removed or renamed — and it extends the
+per-name records rather than becoming a new section or a `Finding`, for the reasons
+under Shell-level masking above.
+
+The CI workflow asserts the schema version, so a bump has to be made in the same
+commit as the change. That friction is the check working.
 
 #### Why schema 3 added `processPosition`
 
@@ -432,9 +461,11 @@ check that hand verification already passed.
 
 Deliberately out of slice 1, in no particular order:
 
-1. **Shell-level masking.** Report when a PATH executable is unreachable because
-   the shell resolves the name to an alias or function first. `diff` and `fc` are
-   live examples. Design settled below; not implemented.
+1. **Shell-level masking, remaining half.** Detection is implemented and specified
+   above. Still open: choosing the interpreter from the command line rather than
+   always asking Windows PowerShell, reporting more than one interpreter per name so
+   `curl` can be shown as masked in 5.1 and not in 7, and a `--fail-on-mask` if
+   anybody actually wants one.
 2. **App Execution Aliases.** Decode `WindowsApps` reparse points to the owning
    package, so a Store stub is named rather than merely flagged. Slice 1 reports
    *that* a file is a reparse point but never *what* it points at, by design —
@@ -466,10 +497,20 @@ Deliberately out of slice 1, in no particular order:
 5. **Automated shadowing cross-check** against `Get-Command -All`, as described
    above.
 
-## Next slice: shell-level masking, design settled
+## Shell-level masking
 
-Detecting the clash is easy. Learning what a shell masks is not, and the choice
-shapes the output contract, so it is settled here before any code.
+**Status: detection implemented.** PowerShell resolves a bare name as alias, then
+function, then cmdlet, then external file — so an alias or function hides an
+executable at a layer `PATH` analysis cannot see. On this machine that is 24 names,
+including `sc` masking `sc.exe`, the Service Control tool, and `where` masking
+`where.exe`.
+
+It extends the per-name records in `executables` rather than becoming a `Finding` or
+a section of its own. A `Finding` describes a directory and masking describes none —
+the entry holding `sc.exe` is perfectly healthy — and a finding belonging to no index
+would break both the type's meaning and the exit-code rule that rests on it.
+Splitting it into its own section would be worse: masking is the same question as
+shadowing one layer up, and both answer "if I type this, what runs".
 
 ### Ask a live shell, and say which shell and whether its profile loaded
 
@@ -489,6 +530,25 @@ should be reused rather than a second one invented. A masking finding therefore
 carries which interpreter was asked and whether its profile was loaded, and a
 consumer that cares can tell "masked in your interactive shell" from "masked in any
 shell".
+
+The interpreter is found in **this tool's own enumeration**, not by a fresh name
+lookup. Resolving `powershell` by name would be a second, unaudited `PATH` search
+inside a tool whose entire purpose is to distrust `PATH` searches — and on this
+machine `pwsh` resolves to a `WindowsApps` reparse point, which this tool flags.
+Windows PowerShell is asked rather than `pwsh` for the same reason: it exists on every
+Windows machine, whereas `pwsh` is frequently an execution-alias stub that would
+launch the Store, which a read-only audit must not do.
+
+`--shell-scan off` skips the scan entirely, and then `Capability::ShellMasking` is
+absent so a `null` intercept reads as "not checked" rather than "not masked" — the
+same discipline as the shadow capability. The scan also declines to claim anything if
+no interpreter is on `PATH`, if the spawn fails, or if it exceeds a ten-second
+timeout, which is generous against a measured 210 ms.
+
+Masking does **not** gate the exit code. `diff` resolving to `Compare-Object` is
+intentional PowerShell design, not a defect, and something is masked on every Windows
+machine — so it would be permanently on, which is the argument that removed shadowing
+from exit 1 in the first place.
 
 The same rule applies as everywhere else in this spec: **do not bake counts.** How
 many names a shell masks is a property of that shell's configuration, not of the

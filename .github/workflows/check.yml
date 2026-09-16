@@ -91,8 +91,12 @@ jobs:
         shell: pwsh
         run: |
           $report = ./target/release/pathdoc.exe --json | ConvertFrom-Json
-          if ($report.schemaVersion -ne 3) {
-            Write-Error "schemaVersion was $($report.schemaVersion), expected 3"
+          if ($report.schemaVersion -ne 4) {
+            Write-Error "schemaVersion was $($report.schemaVersion), expected 4"
+            exit 1
+          }
+          if ($report.capabilities -notcontains 'shellMasking') {
+            Write-Error "the runner's shell was not scanned; capabilities were $($report.capabilities -join ', ')"
             exit 1
           }
           if (-not $report.entries) { Write-Error 'no entries in the report'; exit 1 }

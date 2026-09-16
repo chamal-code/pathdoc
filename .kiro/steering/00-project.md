@@ -156,6 +156,21 @@ PowerShell at test time; shadowing does not, and automating it is on the roadmap
   a fact about the observing process. Assert relationships instead:
   `fresh_winner()` ignores process-only directories and so is harness-independent,
   and composed indices come from the registry, which no harness touches.
+- **Emitted output must be ASCII.** Windows consoles are frequently not UTF-8, so a
+  non-ASCII character in text the program prints arrives as mojibake — an em dash in
+  the interception note printed `ΓÇö`. Doc comments and Markdown are free to use
+  whatever they like; anything reaching a terminal is not. There is a test,
+  `rendered_output_is_ascii_only`, that renders every section including the
+  not-computed branches and fails on the first non-ASCII character. This is the same
+  rule global steering applies to `.ps1` files, for the same reason.
+- **Masking is shell-layer only, and the output has to say so.** A masked name is
+  still perfectly reachable by anything doing a `PATH` search to spawn a process. The
+  finding means "if you type this interactively", not "this binary is unreachable".
+  Without that sentence the report overstates its own conclusion.
+- **The interpreter to ask comes from our own enumeration, by absolute path.**
+  Resolving `powershell` by name would be a second, unaudited `PATH` search inside a
+  tool built to distrust them. Windows PowerShell and not `pwsh`, because `pwsh` here
+  is a `WindowsApps` stub that would launch the Store — a read-only audit must not.
 - **`winget`'s installers append a trailing `;`.** That is where the `Empty` finding
   on this machine keeps coming from. It does not accumulate — always exactly one or
   none — and edits that rebuild the value from a filtered split remove it again.

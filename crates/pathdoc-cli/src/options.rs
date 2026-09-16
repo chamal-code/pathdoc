@@ -1,7 +1,7 @@
 //! Command-line surface, as specified in `docs/SPEC.md`.
 
 use clap::{Parser, ValueEnum};
-use pathdoc_core::{PathEntry, PathScope};
+use pathdoc_core::{PathEntry, PathScope, ShellScan};
 
 /// Read-only auditor for the Windows `PATH`.
 #[allow(
@@ -43,6 +43,10 @@ pub struct Options {
     #[arg(long)]
     pub shadows_only: bool,
 
+    /// Whether to ask a shell what it answers to before `PATH` is searched.
+    #[arg(long, value_enum, default_value_t = ShellScanArg::NoProfile)]
+    pub shell_scan: ShellScanArg,
+
     /// Treat a shadowed executable name as a failure for the exit code.
     ///
     /// Off by default because shadowing is usually correct and intentional:
@@ -66,6 +70,32 @@ impl Options {
             ScopeFilter::User => entry.scope == PathScope::User,
         }
     }
+
+    /// How the core should handle the shell-masking scan.
+    pub fn shell_scan(&self) -> ShellScan {
+        match self.shell_scan {
+            ShellScanArg::Off => ShellScan::Skip,
+            ShellScanArg::NoProfile => ShellScan::Ask { profile: false },
+            ShellScanArg::Profile => ShellScan::Ask { profile: true },
+        }
+    }
+}
+
+/// Whether to ask a shell what it masks, and at what cost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ShellScanArg {
+    /// Do not ask. No process is spawned, and the report says masking was not
+    /// checked rather than reporting nothing masked.
+    Off,
+    /// Ask without loading a user profile. Sees built-in aliases and functions —
+    /// `sc`, `where`, `curl`, `more` — and has no side effects.
+    NoProfile,
+    /// Ask with the user profile loaded.
+    ///
+    /// The only way to see a user's own aliases, and it makes this tool **execute
+    /// arbitrary user code** as a side effect of producing a read-only report. Opt-in
+    /// deliberately.
+    Profile,
 }
 
 /// Which `PATH` scopes to report on.

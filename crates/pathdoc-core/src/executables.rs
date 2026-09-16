@@ -191,7 +191,13 @@ fn group(mut found: Vec<Found>) -> Vec<Resolved> {
 
     let mut resolved: Vec<Resolved> = groups
         .into_iter()
-        .map(|(stem, occurrences)| Resolved { stem, occurrences })
+        .map(|(stem, occurrences)| Resolved {
+            stem,
+            occurrences,
+            // Filled in later by `masking`, which needs the finished list to locate
+            // an interpreter.
+            intercept: None,
+        })
         .collect();
     // `HashMap` order is arbitrary; sort so the report is reproducible.
     resolved.sort_by(|left, right| left.stem.cmp(&right.stem));
