@@ -82,14 +82,16 @@ fn run(options: &Options) -> Result<bool, Box<dyn std::error::Error>> {
 fn reported_findings(report: &AuditReport, entries: &[&PathEntry], shadows_only: bool) -> bool {
     let entry_findings = !shadows_only && entries.iter().any(|entry| !entry.findings.is_empty());
 
-    entry_findings || !report.shadows.is_empty()
+    // `executables` holds every name found, around a thousand of them, so the
+    // question is whether any of them is contested — not whether the list is empty.
+    entry_findings || report.shadowed().next().is_some()
 }
 
 #[cfg(test)]
 mod tests {
     use super::reported_findings;
     use pathdoc_core::{
-        AuditReport, Capability, Finding, Occurrence, PathEntry, PathScope, Shadowed, ValueKind,
+        AuditReport, Capability, Finding, Occurrence, PathEntry, PathScope, Resolved, ValueKind,
     };
 
     fn entry(index: usize, scope: PathScope, findings: Vec<Finding>) -> PathEntry {
@@ -106,8 +108,17 @@ mod tests {
     fn report(entries: Vec<PathEntry>) -> AuditReport {
         AuditReport {
             entries,
-            shadows: Vec::new(),
+            executables: Vec::new(),
             capabilities: vec![Capability::Composition, Capability::EntryFindings],
+        }
+    }
+
+    fn occurrence(entry_index: usize, file_name: &str) -> Occurrence {
+        Occurrence {
+            entry_index,
+            directory: format!(r"C:\place{entry_index}"),
+            file_name: file_name.to_owned(),
+            is_reparse_point: false,
         }
     }
 
@@ -144,7 +155,22 @@ mod tests {
     }
 
     #[test]
-    fn shadows_only_ignores_entry_findings_but_not_shadows() {
+    fn a_name_that_resolves_uniquely_is_not_a_finding() {
+        // The trap this guards: `executables` is never empty on a real machine, so
+        // testing it for emptiness would make every run exit non-zero.
+        let mut clean = report(vec![entry(0, PathScope::Machine, Vec::new())]);
+        clean.capabilities.push(Capability::ShadowDetection);
+        clean.executables = vec![Resolved {
+            stem: "gzip".to_owned(),
+            occurrences: vec![occurrence(0, "gzip.exe")],
+        }];
+        let entries: Vec<&PathEntry> = clean.entries.iter().collect();
+
+        assert!(!reported_findings(&clean, &entries, false));
+    }
+
+    #[test]
+    fn shadows_only_ignores_entry_findings_but_not_shadowing() {
         let mut with_shadow = report(vec![entry(0, PathScope::User, vec![Finding::Missing])]);
         let entries: Vec<&PathEntry> = with_shadow.entries.iter().collect();
 
@@ -152,13 +178,9 @@ mod tests {
         assert!(!reported_findings(&with_shadow, &entries, true));
 
         with_shadow.capabilities.push(Capability::ShadowDetection);
-        with_shadow.shadows = vec![Shadowed {
+        with_shadow.executables = vec![Resolved {
             stem: "git".to_owned(),
-            occurrences: vec![Occurrence {
-                entry_index: 0,
-                file_name: "git.exe".to_owned(),
-                is_reparse_point: false,
-            }],
+            occurrences: vec![occurrence(0, "git.exe"), occurrence(1, "git.exe")],
         }];
         let entries: Vec<&PathEntry> = with_shadow.entries.iter().collect();
 

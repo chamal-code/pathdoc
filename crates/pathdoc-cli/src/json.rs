@@ -28,7 +28,9 @@ pub(crate) fn write_json(
         } else {
             entries.iter().map(|entry| (*entry).clone()).collect()
         },
-        shadows: report.shadows.clone(),
+        // Never filtered. Which copy of a name wins is decided across the whole
+        // PATH, so a scope-narrowed answer would be wrong rather than narrower.
+        executables: report.executables.clone(),
     };
 
     serde_json::to_writer_pretty(&mut *out, &envelope).map_err(io::Error::other)?;
@@ -39,7 +41,7 @@ pub(crate) fn write_json(
 mod tests {
     use super::write_json;
     use pathdoc_core::{
-        AuditReport, Capability, Finding, JsonReport, Occurrence, PathEntry, PathScope, Shadowed,
+        AuditReport, Capability, Finding, JsonReport, Occurrence, PathEntry, PathScope, Resolved,
         ValueKind,
     };
 
@@ -90,7 +92,7 @@ mod tests {
                     findings: Vec::new(),
                 },
             ],
-            shadows: Vec::new(),
+            executables: Vec::new(),
             capabilities: vec![Capability::Composition, Capability::EntryFindings],
         }
     }
@@ -102,7 +104,7 @@ mod tests {
     fn the_envelope_carries_the_schema_version_and_capabilities() {
         let value = parse(&render(&sample(), false));
 
-        assert_eq!(value["schemaVersion"], 1);
+        assert_eq!(value["schemaVersion"], 2);
         assert_eq!(
             value["capabilities"],
             serde_json::json!(["composition", "entryFindings"])
@@ -110,9 +112,9 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_shadow_array_is_distinguishable_from_an_uncomputed_one() {
+    fn an_empty_executables_array_is_distinguishable_from_an_uncomputed_one() {
         let uncomputed = parse(&render(&sample(), false));
-        assert_eq!(uncomputed["shadows"], serde_json::json!([]));
+        assert_eq!(uncomputed["executables"], serde_json::json!([]));
         assert!(
             !uncomputed["capabilities"]
                 .as_array()
@@ -125,7 +127,7 @@ mod tests {
         let mut computed = sample();
         computed.capabilities.push(Capability::ShadowDetection);
         let clean = parse(&render(&computed, false));
-        assert_eq!(clean["shadows"], serde_json::json!([]));
+        assert_eq!(clean["executables"], serde_json::json!([]));
         assert_eq!(
             clean["capabilities"],
             serde_json::json!(["composition", "entryFindings", "shadowDetection"])
@@ -178,25 +180,52 @@ mod tests {
     }
 
     #[test]
-    fn shadow_fields_are_camel_case() {
+    fn executable_fields_are_camel_case() {
         let mut report = sample();
         report.capabilities.push(Capability::ShadowDetection);
-        report.shadows = vec![Shadowed {
+        report.executables = vec![Resolved {
             stem: "git".to_owned(),
             occurrences: vec![Occurrence {
                 entry_index: 0,
+                directory: r"C:\Program Files\Git\cmd".to_owned(),
                 file_name: "git.exe".to_owned(),
                 is_reparse_point: true,
             }],
         }];
 
         let value = parse(&render(&report, false));
-        let occurrence = &value["shadows"][0]["occurrences"][0];
+        let occurrence = &value["executables"][0]["occurrences"][0];
 
-        assert_eq!(value["shadows"][0]["stem"], "git");
+        assert_eq!(value["executables"][0]["stem"], "git");
         assert_eq!(occurrence["entryIndex"], 0);
+        assert_eq!(occurrence["directory"], r"C:\Program Files\Git\cmd");
         assert_eq!(occurrence["fileName"], "git.exe");
         assert_eq!(occurrence["isReparsePoint"], true);
+    }
+
+    #[test]
+    fn an_occurrence_stands_alone_without_the_entries_array() {
+        // The reason `directory` is denormalised: under `--shadows-only` there are
+        // no entries to join against at all.
+        let mut report = sample();
+        report.capabilities.push(Capability::ShadowDetection);
+        report.executables = vec![Resolved {
+            stem: "gzip".to_owned(),
+            occurrences: vec![Occurrence {
+                entry_index: 17,
+                directory: r"C:\Users\Someone\vendored\usr\bin".to_owned(),
+                file_name: "gzip.exe".to_owned(),
+                is_reparse_point: false,
+            }],
+        }];
+
+        let value = parse(&render(&report, true));
+
+        assert_eq!(value["entries"], serde_json::json!([]));
+        assert_eq!(
+            value["executables"][0]["occurrences"][0]["directory"],
+            r"C:\Users\Someone\vendored\usr\bin"
+        );
     }
 
     #[test]
@@ -204,7 +233,7 @@ mod tests {
         let value = parse(&render(&sample(), true));
 
         assert_eq!(value["entries"], serde_json::json!([]));
-        assert_eq!(value["schemaVersion"], 1);
+        assert_eq!(value["schemaVersion"], 2);
     }
 
     #[test]

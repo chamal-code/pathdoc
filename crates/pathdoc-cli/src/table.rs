@@ -9,7 +9,7 @@
 use std::io::{self, Write};
 
 use anstyle::{AnsiColor, Style};
-use pathdoc_core::{AuditReport, Capability, Finding, PathEntry, PathScope, ValueKind};
+use pathdoc_core::{AuditReport, Capability, Finding, PathEntry, PathScope, Resolved, ValueKind};
 
 /// Section titles and column headers.
 const HEADING: Style = Style::new().bold();
@@ -42,7 +42,7 @@ pub(crate) fn write_report(
         write_composition(out, entries)?;
         write_findings(out, entries)?;
     }
-    write_shadows(out, report)
+    write_executables(out, report)
 }
 
 /// The ordered composition table.
@@ -153,55 +153,82 @@ fn write_findings(out: &mut impl Write, entries: &[&PathEntry]) -> io::Result<()
     Ok(())
 }
 
-/// The shadow section, which for now exists mainly to say it is not built.
-fn write_shadows(out: &mut impl Write, report: &AuditReport) -> io::Result<()> {
+/// The contested names, and a count of how many resolved uniquely.
+///
+/// Only the contested ones. Every name found is in `--json`, but there are around
+/// a thousand of them on an ordinary machine and a thousand-row table helps nobody.
+fn write_executables(out: &mut impl Write, report: &AuditReport) -> io::Result<()> {
     if !report.computed(Capability::ShadowDetection) {
         heading(out, "Shadowed executables", "not computed")?;
         return note(
             out,
-            "Executable enumeration is not implemented in this build, so the empty\n  \
-             result above says nothing about shadowing.",
+            "Executable enumeration did not run, so the empty result above says\n  \
+             nothing about shadowing.",
         );
     }
 
+    let shadowed: Vec<&Resolved> = report.shadowed().collect();
     heading(
         out,
         "Shadowed executables",
-        &report.shadows.len().to_string(),
+        &format!("{} of {} names", shadowed.len(), report.executables.len()),
     )?;
 
-    if report.shadows.is_empty() {
-        return note(out, "No executable name resolves from more than one entry.");
+    if shadowed.is_empty() {
+        return note(out, "No executable name resolves from more than one place.");
     }
 
-    for shadowed in &report.shadows {
-        writeln!(
+    for resolved in shadowed {
+        write!(
             out,
             "  {}{}{}",
             HEADING.render(),
-            shadowed.stem,
+            resolved.stem,
             HEADING.render_reset()
         )?;
-        for (position, occurrence) in shadowed.occurrences.iter().enumerate() {
-            let marker = if position == 0 { "wins  " } else { "hidden" };
-            let style = if position == 0 { Style::new() } else { MUTED };
+        if resolved.is_pathext_only() {
+            // Worth saying, because reordering PATH will not change this and
+            // people reliably expect it to.
+            write!(
+                out,
+                "  {}one directory, decided by PATHEXT order{}",
+                MUTED.render(),
+                MUTED.render_reset()
+            )?;
+        }
+        writeln!(out)?;
+
+        for (position, occurrence) in resolved.occurrences.iter().enumerate() {
+            let winning = position == 0;
+            let style = if winning { Style::new() } else { MUTED };
             writeln!(
                 out,
-                "    {}{marker}{}  #{}  {}{}",
+                "    {}{}  #{:<3} {}{}{}",
                 style.render(),
-                style.render_reset(),
+                if winning { "wins  " } else { "hidden" },
                 occurrence.entry_index,
-                occurrence.file_name,
+                join(&occurrence.directory, &occurrence.file_name),
                 if occurrence.is_reparse_point {
-                    "  (reparse point)"
+                    "  (reparse point, not followed)"
                 } else {
                     ""
-                }
+                },
+                style.render_reset()
             )?;
         }
     }
 
     Ok(())
+}
+
+/// Join a directory and a file name, tolerating a directory that already ends in a
+/// separator — `%SYSTEMROOT%\System32\OpenSSH\` on this machine does.
+fn join(directory: &str, file_name: &str) -> String {
+    if directory.ends_with('\\') || directory.ends_with('/') {
+        format!("{directory}{file_name}")
+    } else {
+        format!("{directory}\\{file_name}")
+    }
 }
 
 /// A blank line, then a bold section title with a parenthesised summary.
@@ -283,10 +310,10 @@ fn finding_style(finding: &Finding) -> Style {
 
 #[cfg(test)]
 mod tests {
-    use super::write_report;
+    use super::{join, write_report};
     use anstream::StripStream;
     use pathdoc_core::{
-        AuditReport, Capability, Finding, Occurrence, PathEntry, PathScope, Shadowed, ValueKind,
+        AuditReport, Capability, Finding, Occurrence, PathEntry, PathScope, Resolved, ValueKind,
     };
 
     /// Renders with the ANSI stripped, so assertions read like the output does.
@@ -316,11 +343,21 @@ mod tests {
         }
     }
 
+    /// A report from a build without shadow detection.
     fn report(entries: Vec<PathEntry>) -> AuditReport {
         AuditReport {
             entries,
-            shadows: Vec::new(),
+            executables: Vec::new(),
             capabilities: vec![Capability::Composition, Capability::EntryFindings],
+        }
+    }
+
+    fn occurrence(entry_index: usize, directory: &str, file_name: &str) -> Occurrence {
+        Occurrence {
+            entry_index,
+            directory: directory.to_owned(),
+            file_name: file_name.to_owned(),
+            is_reparse_point: false,
         }
     }
 
@@ -399,9 +436,9 @@ mod tests {
         );
 
         assert!(text.contains("Shadowed executables  (not computed)"));
-        assert!(text.contains("not implemented in this build"));
+        assert!(text.contains("did not run"));
         // The dangerous wording would be a bare zero.
-        assert!(!text.contains("Shadowed executables  (0)"));
+        assert!(!text.contains("Shadowed executables  (0"));
     }
 
     #[test]
@@ -416,38 +453,96 @@ mod tests {
         assert!(text.contains("Shadowed executables"));
     }
 
+    /// A report from a build that did enumerate.
+    fn enumerated(entries: Vec<PathEntry>, executables: Vec<Resolved>) -> AuditReport {
+        AuditReport {
+            entries,
+            executables,
+            capabilities: vec![
+                Capability::Composition,
+                Capability::EntryFindings,
+                Capability::ShadowDetection,
+            ],
+        }
+    }
+
     #[test]
     fn a_shadowed_stem_names_the_winner_and_the_hidden_copies() {
-        let mut computed = report(vec![
-            entry(0, PathScope::Machine, r"C:\Program Files\Git\cmd"),
-            entry(1, PathScope::User, r"C:\Users\Someone\hermes\git\cmd"),
-        ]);
-        computed.capabilities.push(Capability::ShadowDetection);
-        computed.shadows = vec![Shadowed {
-            stem: "git".to_owned(),
-            occurrences: vec![
-                Occurrence {
-                    entry_index: 0,
-                    file_name: "git.exe".to_owned(),
-                    is_reparse_point: false,
-                },
-                Occurrence {
-                    entry_index: 1,
-                    file_name: "git.exe".to_owned(),
-                    is_reparse_point: true,
-                },
+        let mut vendored = occurrence(1, r"C:\Users\Someone\hermes\git\cmd", "git.exe");
+        vendored.is_reparse_point = true;
+        let computed = enumerated(
+            vec![
+                entry(0, PathScope::Machine, r"C:\Program Files\Git\cmd"),
+                entry(1, PathScope::User, r"C:\Users\Someone\hermes\git\cmd"),
             ],
-        }];
+            vec![Resolved {
+                stem: "git".to_owned(),
+                occurrences: vec![
+                    occurrence(0, r"C:\Program Files\Git\cmd", "git.exe"),
+                    vendored,
+                ],
+            }],
+        );
 
         let text = render(&computed, true);
 
-        assert!(text.contains("Shadowed executables  (1)"));
-        assert!(text.contains("git"));
+        assert!(text.contains("Shadowed executables  (1 of 1 names)"));
+        // The full path, not just the file name, so it can be acted on.
+        assert!(text.contains(r"C:\Program Files\Git\cmd\git.exe"));
         let wins = text.find("wins");
         let hidden = text.find("hidden");
         assert!(wins.is_some() && hidden.is_some());
         assert!(wins < hidden, "the winner is listed first");
-        assert!(text.contains("(reparse point)"));
+        assert!(text.contains("reparse point, not followed"));
+    }
+
+    #[test]
+    fn a_name_that_resolves_uniquely_is_counted_but_not_listed() {
+        // Around a thousand of these on a real machine, so the table counts them
+        // and `--json` carries them.
+        let computed = enumerated(
+            vec![entry(0, PathScope::User, r"C:\Users\Someone\vendored")],
+            vec![Resolved {
+                stem: "gzip".to_owned(),
+                occurrences: vec![occurrence(0, r"C:\Users\Someone\vendored", "gzip.exe")],
+            }],
+        );
+
+        let text = render(&computed, true);
+
+        assert!(text.contains("Shadowed executables  (0 of 1 names)"));
+        assert!(text.contains("No executable name resolves from more than one place."));
+        assert!(!text.contains("gzip"));
+    }
+
+    #[test]
+    fn a_contest_inside_one_directory_says_pathext_decided_it() {
+        let computed = enumerated(
+            vec![entry(0, PathScope::Machine, r"C:\WINDOWS\system32")],
+            vec![Resolved {
+                stem: "powercfg".to_owned(),
+                occurrences: vec![
+                    occurrence(0, r"C:\WINDOWS\system32", "powercfg.exe"),
+                    occurrence(0, r"C:\WINDOWS\system32", "powercfg.cpl"),
+                ],
+            }],
+        );
+
+        let text = render(&computed, true);
+
+        assert!(text.contains("one directory, decided by PATHEXT order"));
+    }
+
+    #[test]
+    fn a_directory_that_already_ends_in_a_separator_is_not_doubled() {
+        assert_eq!(
+            join(r"C:\WINDOWS\System32\OpenSSH\", "ssh.exe"),
+            r"C:\WINDOWS\System32\OpenSSH\ssh.exe"
+        );
+        assert_eq!(
+            join(r"C:\Program Files\Git\cmd", "git.exe"),
+            r"C:\Program Files\Git\cmd\git.exe"
+        );
     }
 
     #[test]

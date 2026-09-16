@@ -73,14 +73,31 @@ appears in `PATHEXT` (default `.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;
 compared case-insensitively. Read `PATHEXT` from the environment rather than
 hard-coding it.
 
+That last point is not pedantry. On this machine `PATHEXT` is
+`.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC;.CPL` — one entry longer
+than the documented default — and `system32` holds `powercfg.cpl` beside
+`powercfg.exe`. Hard-coding the default would have missed it.
+
 Group by stem, case-insensitively, since Windows resolution is case-insensitive.
-Where a stem appears in more than one entry, report the winner and every shadowed
-copy in order. Also flag when a single directory holds the same stem under several
-extensions, because `foo.com` beats `foo.exe` by `PATHEXT` order and that surprises
-people.
+Only the matched extension comes off the name, so `python3.11.exe` is the program
+`python3.11` and not `python3`.
+
+Resolution order is `PATH` order first, then `PATHEXT` order within a single
+directory — both loops, because the inner one is the part people forget. Report
+every place a name resolves from, in that order, so `occurrences[0]` is the copy
+that wins. Flag separately when every occurrence sits in the *same* directory,
+because then `PATHEXT` decided it and no amount of reordering `PATH` will help:
+`winrm.cmd` beats `winrm.vbs` in `system32`, whatever order the filesystem lists
+them in.
+
+A directory that appears twice on `PATH` is enumerated once. The later entry
+already carries a `Duplicate` finding, and reading it again would report every
+program in it as shadowing itself.
 
 Reparse points get reported as such rather than followed, so a `WindowsApps`
-alias stub is distinguishable from a real binary.
+alias stub is distinguishable from a real binary. Verified live on this machine:
+`WinGet\Links\uv.exe` is a symlink into the package directory and is reported as
+one, while `~\.local\bin\python.exe` is a real binary and is not.
 
 ### Output
 
@@ -112,8 +129,8 @@ library and one that parses this output cannot drift apart.
 
 ```json
 {
-  "schemaVersion": 1,
-  "capabilities": ["composition", "entryFindings"],
+  "schemaVersion": 2,
+  "capabilities": ["composition", "entryFindings", "shadowDetection"],
   "entries": [
     {
       "index": 0,
@@ -124,7 +141,19 @@ library and one that parses this output cannot drift apart.
       "findings": []
     }
   ],
-  "shadows": []
+  "executables": [
+    {
+      "stem": "git",
+      "occurrences": [
+        {
+          "entryIndex": 7,
+          "directory": "C:\\Program Files\\Git\\cmd",
+          "fileName": "git.exe",
+          "isReparsePoint": false
+        }
+      ]
+    }
+  ]
 }
 ```
 
@@ -142,8 +171,19 @@ Rules the shape follows:
   contradict the two it derives from.
 - `findings` entries are a discriminated union on `kind`: `{"kind": "missing"}`,
   `{"kind": "duplicate", "firstSeenAt": 0}`.
-- `capabilities` says what the run actually computed. **An empty `shadows` means
-  "nothing is shadowed" only when `shadowDetection` is listed; otherwise it means
+- `executables` holds **every** name found, sorted by stem, not only the contested
+  ones — around a thousand on an ordinary machine. `occurrences` is in resolution
+  order, so `occurrences[0]` is the one that wins, and a name is shadowed when
+  there is more than one. See the note on schema 2 below for why it is not filtered.
+- `occurrences[].directory` is denormalised rather than left as a join on
+  `entryIndex`. `entries` may be a filtered subset, or empty under
+  `--shadows-only`, and an occurrence that cannot be understood without an array
+  that might not be present is not much of a fact.
+- `executables` is **never** filtered by `--scope`. Which copy of a name wins is
+  decided across the whole `PATH`, so a scope-narrowed answer would be wrong
+  rather than merely narrower.
+- `capabilities` says what the run actually computed. **An empty `executables`
+  means "nothing found" only when `shadowDetection` is listed; otherwise it means
   "not computed".** Without this a consumer shows a clean bill of health for work
   that never ran, which is worse than showing nothing.
 - `schemaVersion` bumps only on a breaking change: a field removed or renamed, an
@@ -152,6 +192,18 @@ Rules the shape follows:
 
 The assertions pinning all of the above live in `crates/pathdoc-cli/src/json.rs`,
 so breaking the contract breaks a test.
+
+#### Why schema 2 replaced `shadows` with `executables`
+
+Schema 1 had a `shadows` array holding only names that resolve from more than one
+place. That could not satisfy this spec's own acceptance criteria. Of the four
+executables listed under Verification below, **three — `gzip`, `unzip` and
+`sdiff` — appear exactly once**, as does `python`. A conflicts-only array could
+never have named them, and "`gzip` comes out of a chat client's private folder" is
+exactly the kind of fact this tool exists to surface.
+
+So the report carries every name it found and a consumer filters. `shadows` was
+the wrong shape, not a wrong implementation of the right shape.
 
 ### Exit codes
 
@@ -174,18 +226,24 @@ The acceptance test is unusually concrete, because the expected answers were
 established by hand during provisioning. On this machine, slice 1 must:
 
 - [x] report exactly one dead entry, `...\AppData\Local\Programs\Ollama`
-- [ ] report three `git.exe`, with `C:\Program Files\Git\cmd` winning
-- [ ] report the vendored `gzip.exe`, `bash.exe`, `unzip.exe`, `sdiff.exe`
-- [ ] report `python.exe` resolving from `~\.local\bin`, with no `WindowsApps` stub
+- [x] report three `git.exe`, with `C:\Program Files\Git\cmd` winning
+- [x] report the vendored `gzip.exe`, `bash.exe`, `unzip.exe`, `sdiff.exe`
+- [x] report `python.exe` resolving from `~\.local\bin`, with no `WindowsApps` stub
   remaining
-- [ ] report `uv.exe` twice, with `...\WinGet\Links` winning
+- [x] report `uv.exe` twice, with `...\WinGet\Links` winning
 - [x] **not** flag the `fnm_multishells` process-only entry as an error
 
-The two checked items are covered by `crates/pathdoc-core/tests/this_machine.rs`,
-which also pins the composition itself: 8 machine entries, 14 user, 22 composed,
+All six are covered by `crates/pathdoc-core/tests/this_machine.rs`, which also
+pins the composition itself — 8 machine entries, 14 user, 22 composed,
 `C:\WINDOWS\system32` at index 0 stored as `%SystemRoot%\system32`,
-`C:\Program Files\Git\cmd` at index 7, and the first user entry at index 8.
-The four unchecked items all need executable enumeration.
+`C:\Program Files\Git\cmd` at index 7, the first user entry at index 8 — and the
+`PATHEXT`, versioned-shim and reparse-point behaviour described above.
+
+What the audit finds here, for reference: 1031 distinct executable names across
+23 directories, 38 of them resolving from more than one place. Eight of those 38
+are single-directory `PATHEXT` contests. Nothing on this `PATH` refuses to
+enumerate, so `Unreadable` has no live example and is covered by a test that
+denies itself read on a temporary directory instead.
 
 Cross-check shadowing against PowerShell's own resolver, which is the
 independent reference:

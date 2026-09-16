@@ -20,22 +20,34 @@ hand. This tool exists so that is a command instead of an afternoon.
 
 ## Status
 
-Slice 1, part way through. Working today:
+Slice 1 complete. All three questions above are answered:
 
 - `PATH` read from both registry scopes and composed in the order Windows
   resolves, machine before user
 - `REG_SZ` and `REG_EXPAND_SZ` kept apart, with the stored and resolved forms
   both reported
-- per-entry findings: missing, not-a-directory, duplicate, empty segment, relative
+- per-entry findings: missing, not-a-directory, duplicate, empty segment,
+  relative, unreadable
 - directories injected into the live process `PATH` reported as process-only,
   which is legitimate rather than a problem
+- executables enumerated per `PATHEXT`, read from the environment, with every
+  name's resolution order reported and contested names flagged — including the
+  ones decided by `PATHEXT` rather than `PATH`, which is the case people miss
+- reparse points reported rather than followed, so a Store alias stub stays
+  distinguishable from a real binary
 - table output with colour, and `--json` against a versioned contract
 
-Not built yet: executable enumeration, `PATHEXT` handling, and shadow detection —
-which is to say the third and most useful of the three questions above. Until it
-lands, the tool says so in as many words rather than reporting zero shadows.
+On the machine it was written for that is 1031 executable names across 23
+directories, 38 of them resolving from more than one place. Every finding that
+took an afternoon to dig out by hand during provisioning is now in the output,
+and each one is pinned by a test.
 
-Full behaviour, the JSON contract, verification criteria and roadmap:
+Next up is the roadmap in [`docs/SPEC.md`](docs/SPEC.md) — shell-level alias
+masking, decoding `WindowsApps` stubs to their owning package, and an env-var
+backup and diff tool sharing this registry layer. Mutation stays out until it has
+a design for backups, dry-run and confirmation.
+
+Full behaviour, the JSON contract and verification criteria are also in
 [`docs/SPEC.md`](docs/SPEC.md).
 
 ## Layout

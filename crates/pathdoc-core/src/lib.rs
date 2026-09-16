@@ -12,6 +12,7 @@
 //! names it produces.
 
 mod compose;
+mod executables;
 mod probe;
 mod registry;
 
@@ -21,7 +22,14 @@ mod registry;
 /// renamed, an enum representation altered, or the meaning of an existing field
 /// changed. Adding a field, an enum variant, or a [`Capability`] is additive and
 /// does not bump it.
-pub const SCHEMA_VERSION: u32 = 1;
+///
+/// `2` replaced a `shadows` array holding only contested names with an
+/// [`AuditReport::executables`] array holding every name found. Reason: on the
+/// machine this was built for, three of the four executables worth reporting —
+/// `gzip`, `unzip`, `sdiff` — appear exactly once, so a conflicts-only list could
+/// never have named them. "Where does this come from" turned out to be as much of
+/// a question as "which one wins".
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// Where a `PATH` entry came from.
 ///
@@ -148,8 +156,14 @@ impl PathEntry {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
 pub struct Occurrence {
-    /// Index of the `PathEntry` that contains it.
+    /// Index of the [`PathEntry`] that contains it, in the full composed order.
     pub entry_index: usize,
+    /// The directory it was found in — the containing entry's effective value.
+    ///
+    /// Denormalised on purpose. A front end may report a filtered subset of
+    /// entries, and an occurrence that can only be understood by joining against
+    /// an array that might not be there is not much of a fact.
+    pub directory: String,
     /// File name including extension, as it appears on disk.
     pub file_name: String,
     /// Reported rather than followed, so Store alias stubs stay distinguishable
@@ -157,16 +171,55 @@ pub struct Occurrence {
     pub is_reparse_point: bool,
 }
 
-/// An executable name that exists in more than one `PATH` entry.
+/// Every place one executable name resolves from.
+///
+/// Recorded for every name found, not only the contested ones. That is a
+/// correction to an earlier design: of the four executables this tool was written
+/// to expose on its home machine, three (`gzip`, `unzip`, `sdiff`) appear exactly
+/// once, and a conflicts-only list could never have reported them. Where a name
+/// comes from is a fact worth having even when nothing competes for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
-pub struct Shadowed {
+pub struct Resolved {
     /// Lower-cased file stem, since Windows resolution is case-insensitive.
     pub stem: String,
-    /// Every place the stem was found, in composed `PATH` order. The first
-    /// element is the one that wins.
+    /// Every place the stem was found, in the order Windows tries them: composed
+    /// `PATH` order first, then `PATHEXT` order within a single directory. The
+    /// first element is the one that wins.
     pub occurrences: Vec<Occurrence>,
+}
+
+impl Resolved {
+    /// The occurrence Windows would actually run.
+    #[must_use]
+    pub fn winner(&self) -> Option<&Occurrence> {
+        self.occurrences.first()
+    }
+
+    /// Whether more than one file answers to this name.
+    #[must_use]
+    pub fn is_shadowed(&self) -> bool {
+        self.occurrences.len() > 1
+    }
+
+    /// Whether every occurrence sits in the same directory, making this a contest
+    /// decided by `PATHEXT` order rather than by `PATH` order.
+    ///
+    /// Worth separating because it surprises people: `foo.com` beats `foo.exe`,
+    /// and no amount of reordering `PATH` will change that.
+    #[must_use]
+    pub fn is_pathext_only(&self) -> bool {
+        match self.occurrences.split_first() {
+            Some((first, rest)) => {
+                !rest.is_empty()
+                    && rest
+                        .iter()
+                        .all(|other| other.entry_index == first.entry_index)
+            }
+            None => false,
+        }
+    }
 }
 
 /// The result of one audit run.
@@ -174,8 +227,8 @@ pub struct Shadowed {
 pub struct AuditReport {
     /// Every entry on the composed `PATH`, in order.
     pub entries: Vec<PathEntry>,
-    /// Executable names resolvable from more than one entry.
-    pub shadows: Vec<Shadowed>,
+    /// Every executable name found, sorted by stem. See [`Resolved`].
+    pub executables: Vec<Resolved>,
     /// What this run actually computed. See [`Capability`].
     pub capabilities: Vec<Capability>,
 }
@@ -184,7 +237,14 @@ impl AuditReport {
     /// Whether the audit found anything worth a non-zero exit code.
     #[must_use]
     pub fn has_findings(&self) -> bool {
-        self.entries.iter().any(|e| !e.findings.is_empty()) || !self.shadows.is_empty()
+        self.entries.iter().any(|e| !e.findings.is_empty()) || self.shadowed().next().is_some()
+    }
+
+    /// Only the names more than one file answers to.
+    pub fn shadowed(&self) -> impl Iterator<Item = &Resolved> {
+        self.executables
+            .iter()
+            .filter(|resolved| resolved.is_shadowed())
     }
 
     /// Whether this run performed a given class of analysis.
@@ -212,8 +272,10 @@ pub struct JsonReport {
     pub capabilities: Vec<Capability>,
     /// Composed `PATH` entries, possibly filtered.
     pub entries: Vec<PathEntry>,
-    /// Shadowed executable names, possibly filtered.
-    pub shadows: Vec<Shadowed>,
+    /// Every executable name found. Never filtered by scope: which copy of a name
+    /// wins is decided across the whole `PATH`, so a scoped answer would be wrong
+    /// rather than merely narrower.
+    pub executables: Vec<Resolved>,
 }
 
 #[cfg(feature = "serde")]
@@ -223,7 +285,7 @@ impl From<AuditReport> for JsonReport {
             schema_version: SCHEMA_VERSION,
             capabilities: report.capabilities,
             entries: report.entries,
-            shadows: report.shadows,
+            executables: report.executables,
         }
     }
 }
@@ -257,13 +319,8 @@ impl std::error::Error for AuditError {}
 /// cannot be read. A scope that simply has no `Path` value is not an error; it
 /// contributes no entries.
 ///
-/// # Implementation status
-///
-/// Composition and per-entry findings are implemented. Executable enumeration,
-/// `PATHEXT` handling, shadow detection and the [`Finding::Unreadable`] verdict
-/// are the next task, so [`AuditReport::shadows`] is always empty for now and
-/// [`Capability::ShadowDetection`] is deliberately absent from the returned
-/// capabilities.
+/// Then enumerates the executables in each surviving directory and works out
+/// which copy of each name Windows would actually run.
 pub fn audit() -> Result<AuditReport, AuditError> {
     let machine = registry::read_machine_path()?;
     let user = registry::read_user_path()?;
@@ -275,18 +332,27 @@ pub fn audit() -> Result<AuditReport, AuditError> {
 
     let mut entries =
         compose::compose(machine.as_ref(), user.as_ref(), process.as_deref(), &lookup);
+
+    // Order matters: the filesystem probe decides which entries are worth
+    // enumerating, and enumeration is what can add `Unreadable`.
     probe::annotate(&mut entries);
+    let extensions = executables::extensions(&lookup);
+    let executables = executables::enumerate(&mut entries, &extensions);
 
     Ok(AuditReport {
         entries,
-        shadows: Vec::new(),
-        capabilities: vec![Capability::Composition, Capability::EntryFindings],
+        executables,
+        capabilities: vec![
+            Capability::Composition,
+            Capability::EntryFindings,
+            Capability::ShadowDetection,
+        ],
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{AuditReport, Capability, PathEntry, PathScope, audit};
+    use super::{AuditReport, Capability, Occurrence, PathEntry, PathScope, Resolved, audit};
 
     #[test]
     fn empty_report_has_no_findings() {
@@ -333,16 +399,68 @@ mod tests {
     }
 
     #[test]
-    fn audit_reports_what_it_did_and_did_not_compute() {
+    fn audit_reports_what_it_computed() {
         match audit() {
             Ok(report) => {
                 assert!(report.computed(Capability::Composition));
                 assert!(report.computed(Capability::EntryFindings));
-                // Not yet built. An empty `shadows` must not read as clean.
-                assert!(!report.computed(Capability::ShadowDetection));
-                assert!(report.shadows.is_empty());
+                assert!(report.computed(Capability::ShadowDetection));
             }
             Err(err) => panic!("audit failed: {err}"),
         }
+    }
+
+    #[test]
+    fn audit_finds_executables_and_shadowing_is_a_subset_of_them() {
+        // Portable: `system32` alone guarantees both, since it ships several names
+        // under two extensions apiece.
+        match audit() {
+            Ok(report) => {
+                assert!(!report.executables.is_empty());
+                let shadowed = report.shadowed().count();
+                assert!(shadowed <= report.executables.len());
+                for resolved in report.shadowed() {
+                    assert!(resolved.occurrences.len() > 1);
+                }
+            }
+            Err(err) => panic!("audit failed: {err}"),
+        }
+    }
+
+    #[test]
+    fn a_single_occurrence_is_not_shadowed() {
+        let resolved = Resolved {
+            stem: "gzip".to_owned(),
+            occurrences: vec![Occurrence {
+                entry_index: 17,
+                directory: r"C:\vendored\usr\bin".to_owned(),
+                file_name: "gzip.exe".to_owned(),
+                is_reparse_point: false,
+            }],
+        };
+
+        assert!(!resolved.is_shadowed());
+        assert!(!resolved.is_pathext_only());
+        assert_eq!(
+            resolved.winner().map(|occurrence| occurrence.entry_index),
+            Some(17)
+        );
+    }
+
+    #[test]
+    fn a_contest_inside_one_directory_is_decided_by_pathext() {
+        let occurrence = |file_name: &str| Occurrence {
+            entry_index: 0,
+            directory: r"C:\WINDOWS\system32".to_owned(),
+            file_name: file_name.to_owned(),
+            is_reparse_point: false,
+        };
+        let resolved = Resolved {
+            stem: "powercfg".to_owned(),
+            occurrences: vec![occurrence("powercfg.exe"), occurrence("powercfg.cpl")],
+        };
+
+        assert!(resolved.is_shadowed());
+        assert!(resolved.is_pathext_only());
     }
 }
