@@ -23,7 +23,7 @@
   },
   "git": {
     "isRepo": true,
-    "remote": null,
+    "remote": "https://github.com/chamal-code/pathdoc",
     "defaultBranch": "main"
   },
   "commands": {
