@@ -63,8 +63,11 @@ Full behaviour, the JSON contract and verification criteria are also in
 
 ```
 Cargo.toml                          workspace root
-crates/pathdoc-core/                library: reads and analyses, returns data, never prints
-  src/registry.rs                     the only code touching the registry, read-only
+justfile                            the one entry point: `just check` is the gate
+deny.toml                           licence and advisory gates
+crates/winenv/                      NOT a pathdoc crate: registry reads, no PATH awareness
+crates/pathdoc-core/                library: analyses, returns data, never prints
+  src/registry.rs                     thin adapter over winenv
   src/compose.rs                      pure: splitting, expansion, ordering, findings
   src/probe.rs                        the only code touching the disk for entries
   src/executables.rs                  enumeration, PATHEXT, shadow resolution
@@ -77,11 +80,31 @@ docs/SPEC.md                        specification, JSON contract, roadmap
 .kiro/steering/00-project.md        rules and gotchas for anyone working on this
 ```
 
-The split is not ceremony. Keeping the core presentation-free is what allows a
-shared GUI over several of these tools later, linking the libraries directly
-rather than shelling out and scraping text.
+The split is not ceremony.
+
+Keeping the core presentation-free is what allows a shared GUI over several of these
+tools later, linking the libraries directly rather than shelling out and scraping
+text.
+
+And `winenv` is deliberately outside pathdoc. It answers one question — what is
+stored under this name, in this scope, and what kind of value is it — and knows
+nothing about `;`, about machine-before-user, or about directories. An env-var
+backup tool needs exactly that and none of `PathEntry`, `Resolved` or
+`AuditReport`. Dependencies point from each tool at `winenv`, never from one tool at
+another.
 
 ## Running it
+
+```powershell
+just                        # list the recipes
+just check                  # fmt, clippy in both feature sets, tests, licence gates
+just test                   # cargo nextest run --all-features
+just test-machine           # only the machine-specific acceptance test
+just audit                  # release build, run without cargo's extra PATH entries
+just run --json             # pass flags through to the debug build
+```
+
+Or without `just`:
 
 ```powershell
 cargo run -p pathdoc-cli --                      # audit this machine
@@ -91,11 +114,18 @@ cargo run -p pathdoc-cli -- --fail-on-shadow     # make shadowing gate CI
 cargo run -p pathdoc-cli -- --help
 
 cargo test
-cargo clippy --all-targets
+cargo clippy --all-targets --all-features
+cargo clippy -p pathdoc-core --all-targets       # core must be clean without serde too
 cargo fmt --check
 ```
 
-Requires the `stable` toolchain, pinned in `rust-toolchain.toml`. Nothing else.
+Requires the `stable` toolchain, pinned in `rust-toolchain.toml`. `just`,
+`cargo-nextest` and `cargo-deny` for the recipes; plain `cargo` needs nothing extra.
+
+One trap, since it cost two false test failures: `just` on Windows defaults to
+running recipes through `sh`, and on this machine the first `sh` on `PATH` is an
+MSYS shell vendored inside another application, which prepends `/mingw64/bin` and
+`/usr/bin`. The `justfile` pins PowerShell explicitly. Do not remove that line.
 
 Run the built binary directly rather than through `cargo run` if the process-only
 count matters: cargo prepends its own directories to the child's `PATH`, so
@@ -157,7 +187,7 @@ All pinned exactly. Every one of them is here for a stated reason:
 
 | Need | Crate | Why this one |
 | --- | --- | --- |
-| Registry reads | `winreg` | Every `Reg*` in the `windows` crate is an `unsafe fn`, and `unsafe_code` is `forbid` at workspace level. `winreg` is a thin safe wrapper over `windows-sys`, exposes the value type, and returns values unexpanded. |
+| Registry reads | `winreg`, via `winenv` | Every `Reg*` in the `windows` crate is an `unsafe fn`, and `unsafe_code` is `forbid` at workspace level. `winreg` is a thin safe wrapper over `windows-sys`, exposes the value type, and returns values unexpanded. Only `winenv` depends on it. |
 | Argument parsing | `clap` (derive) | Also already exits `2` on a usage error, which is the convention here. |
 | `--json` | `serde` (optional in core) + `serde_json` | The derives live on the core types so a linked GUI and a JSON consumer see one contract. Optional so a consumer that never serialises does not pay for it. |
 | Colour | `anstream` + `anstyle` | Honours `NO_COLOR`, checks for a terminal, and enables Windows virtual terminal processing — the unsafe for which sits in `anstyle-wincon`. Already in the tree via `clap`. |
@@ -178,7 +208,7 @@ stays because a normalised fixture is a silently meaningless test.
 
 ## Testing
 
-122 tests, in three groups:
+136 tests, in three groups:
 
 - **Unit tests**, portable. Every input is explicit, including the environment
   lookup, so no machine's layout leaks into the logic.

@@ -1,0 +1,39 @@
+# Licence and advisory gates for `cargo deny check`, run by `just deny`.
+#
+# Relevant now these repositories are going public: the point is that a new
+# dependency with an unexpected licence fails the build rather than arriving
+# unnoticed.
+
+[graph]
+# Windows-only tooling. Restricting the target keeps the graph to what is actually
+# compiled instead of every platform's conditional dependencies.
+targets = ["x86_64-pc-windows-msvc"]
+
+[licenses]
+# Deliberately the exact set present in the tree, not a generous list of everything
+# permissive. Something new should trip this and be looked at once.
+#
+#   Apache-2.0, MIT   the ecosystem's usual dual licence, and this workspace's own
+#   Unicode-3.0       unicode-ident
+#   Unlicense         memchr, which is MIT OR Unlicense
+allow = ["Apache-2.0", "MIT", "Unicode-3.0", "Unlicense"]
+
+[bans]
+# A duplicated dependency is worth knowing about but not worth failing over: it is
+# usually somebody else's transitive choice and not actionable here.
+multiple-versions = "warn"
+# A wildcard version requirement on a crates.io dependency is a real problem.
+wildcards = "deny"
+# An intra-workspace `path` dependency is not: there is no version to constrain,
+# and pretending otherwise would put a fictional number in Cargo.toml. This is the
+# exception for `winenv` and `pathdoc-core`.
+allow-wildcard-paths = true
+
+[advisories]
+# A yanked version is a decision somebody made for a reason.
+yanked = "deny"
+
+[sources]
+# Everything must come from crates.io or a path inside this workspace.
+unknown-registry = "deny"
+unknown-git = "deny"

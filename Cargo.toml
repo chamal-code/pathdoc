@@ -1,5 +1,8 @@
 [workspace]
-members = ["crates/pathdoc-core", "crates/pathdoc-cli"]
+# `winenv` is deliberately not a pathdoc crate. It knows nothing about PATH, and
+# exists so a second tool can read the registry without depending on this one.
+# Dependencies point from each tool at it, never from one tool at another.
+members = ["crates/winenv", "crates/pathdoc-core", "crates/pathdoc-cli"]
 resolver = "3"
 
 [workspace.package]

@@ -1,0 +1,24 @@
+[package]
+name = "winenv"
+description = "Read Windows environment variables out of the registry, unexpanded, with the value kind they were stored under."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Chosen over the `windows` crate because every Reg* function there is an
+# `unsafe fn`, which would put an `unsafe` block in this crate — forbidden at
+# workspace level. winreg is a thin safe wrapper over `windows-sys` that keeps
+# that unsafe in the dependency, exposes the value type through `RegValue.vtype`
+# so REG_SZ and REG_EXPAND_SZ stay distinguishable, and returns values
+# unexpanded, which is the whole point of this crate.
+#
+# Pinned exactly: this is the one place the toolkit reads privileged machine
+# state, so the version is a deliberate decision rather than whatever resolves
+# today.
+winreg = { version = "=0.56.0", default-features = false }

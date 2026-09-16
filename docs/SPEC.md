@@ -72,6 +72,14 @@ is a legitimate example and must not be reported as an error.
 | `NotADirectory` | Path exists but is a file |
 | `Duplicate` | Same canonical path appears earlier in the composed order |
 | `Empty` | Empty segment, usually a stray `;` |
+
+On `Empty` specifically, because it turned up repeatedly on this machine and the
+cause was not obvious: **winget's installers append a trailing `;`** when they add
+a package directory. It does not accumulate — five `PATH` backups taken across
+2026-09-16 showed exactly one empty segment or none, never two, so a single
+separator is being re-added rather than compounding. Edits that rebuild the value
+from a filtered split remove it again, so it appears and disappears depending on
+which happened last.
 | `Relative` | Not an absolute path; resolution depends on the current directory |
 | `Unreadable` | Exists but enumeration failed, e.g. denied by ACL |
 
@@ -117,6 +125,16 @@ Both are reported. Every entry carries its position in the live process `PATH`, 
 since the process started looks like. Occurrences are ranked by live position, with
 unreachable ones last, and the fresh-process winner is reported alongside whenever
 it differs.
+
+**How many entries a process can or cannot see is a property of that process, not
+of the machine, and must never be asserted as a machine fact.** Three observers
+disagreed on one afternoon and all three were right: a shell started before a batch
+of installs saw seven registry entries as unreachable; a long-lived shell that had
+been assigned `$env:Path = machine + ';' + user` saw none, having dropped the
+injected shim while keeping `FNM_MULTISHELL_PATH` set, which is impossible in a
+clean shell; and a `cargo test` binary sees four extra directories cargo prepends.
+The ordering *arithmetic* is unit-tested against synthetic `PATH` values where both
+sides are controlled; the acceptance test only confirms the mechanism exists.
 
 The live example, since 2026-09-16: `node`, `npm`, `npx` and `corepack` sit in both
 `%APPDATA%\fnm\aliases\default`, a registry entry, and `...\fnm_multishells\<id>`,
@@ -415,16 +433,44 @@ Deliberately out of slice 1, in no particular order:
    package, so a Store stub is named rather than merely flagged. Slice 1 reports
    *that* a file is a reparse point but never *what* it points at, by design —
    `WinGet\Links\uv.exe` is a live example.
-3. **Env var backup & diff.** PATH is one variable; the registry layer built here
-   generalises. Intended as the next tool in the workspace, sharing
-   `pathdoc-core`'s registry module — which is currently `mod registry`, private,
-   so this needs the module made public or lifted into a crate of its own. Worth
-   deciding which before a second tool depends on it.
+3. **Env var backup & diff.** PATH is one variable; the registry layer generalises,
+   and has been extracted into the `winenv` crate ready for it. That crate is the
+   dependency to take — **not** `pathdoc-core`, which would drag `PathEntry`,
+   `Resolved` and `AuditReport` into a tool that has no use for any of them. See
+   the crate boundary below. Still to decide when the second tool exists: whether
+   `winenv` moves to its own repository or is consumed from this one by path or git,
+   since the trunk's convention is one repository per project.
 4. **Fix mode.** Only after backup, dry-run and confirmation are designed properly.
    Note the `SetEnvironmentVariable` trap recorded under Verification before
    writing a line of it.
 5. **Automated shadowing cross-check** against `Get-Command -All`, as described
    above.
+
+## Crate boundaries
+
+Three crates, and the boundaries are the point rather than tidiness.
+
+| Crate | Owns | Knows about `PATH`? |
+| --- | --- | --- |
+| `winenv` | Reading an environment variable from a registry scope, unexpanded, with its value kind. Name enumeration. | No |
+| `pathdoc-core` | Splitting, expansion, machine-before-user composition, findings, enumeration, shadowing. | Yes |
+| `pathdoc-cli` | Every column width, colour code and exit code. | Yes |
+
+**Dependencies point from each tool at `winenv`, never from one tool at another.**
+That is why the registry access is its own crate rather than a public module of
+`pathdoc-core`: the env-var backup tool needs registry reads and has no use for
+`PathEntry` or `AuditReport`, and a GUI that links several of these tools should not
+inherit one tool's model to reach another's plumbing. Normally extracting for a
+single consumer would be speculative; there is a known second consumer, which is
+exactly when it stops being.
+
+The boundary is drawn at **registry access, not `PATH` semantics**. `winenv` has no
+opinion about `;`, about machine-before-user, or about what a directory is.
+
+`winenv` is also deliberately serde-free. `pathdoc-core` owns its wire shape, maps
+`winenv::ValueKind` into its own, and rejects anything that is not a string kind —
+so adding a kind to `winenv` is a compile error in the adapter rather than a silent
+reclassification.
 
 ## Design constraint carried across the whole toolkit
 

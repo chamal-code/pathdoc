@@ -37,21 +37,28 @@ use pathdoc_core::{
 };
 
 // ---------------------------------------------------------------------------
-// VOLATILE. Verified against the live registry on 2026-09-16 at 18:05. These
-// move whenever anything is installed, so they live in one block. Confirm with
-// the trunk before changing them.
+// VOLATILE. Read from the live registry on 2026-09-16 at 18:20 and pinned here.
+// These move whenever anything is installed. Re-read before changing them, and
+// ask the trunk what it did — do not take a number on trust, including from the
+// trunk: a list that was authoritative when it was written decayed within
+// minutes on the day these were established.
 // ---------------------------------------------------------------------------
 
 /// Entries in `HKLM`. Went 8 to 10 when GitHub CLI and starship were installed.
 const MACHINE_ENTRIES: usize = 10;
 
-/// Entries in `HKCU`. Went 14 to 18: `fnm\aliases\default`, zoxide, just and dust
+/// Entries in `HKCU`. Went 14 to 17: `fnm\aliases\default`, zoxide, just and dust
 /// were appended, and the dead `Programs\Ollama` entry was pruned.
-const USER_ENTRIES: usize = 18;
+const USER_ENTRIES: usize = 17;
 
-/// The user value currently ends in a stray `;`, left behind by whatever appended
-/// to it. A real defect, and pathdoc reports it. Drop to 0 when the trunk trims it.
-const TRAILING_EMPTY_SEGMENTS: usize = 1;
+/// winget's installers append a trailing `;` when they add a package directory,
+/// and the trunk's edits strip it again because they rebuild the value from a
+/// filtered split. So this flips between 0 and 1 depending on which happened last.
+///
+/// It does **not** accumulate: five backups taken across 2026-09-16 showed exactly
+/// one empty segment or none, never two. A single separator being re-added, not a
+/// growing tail.
+const TRAILING_EMPTY_SEGMENTS: usize = 0;
 
 /// Index of `C:\Program Files\Git\cmd`. Stable so far: the entries added since
 /// went after it.
@@ -113,29 +120,70 @@ fn resolved<'a>(report: &'a AuditReport, stem: &str) -> &'a Resolved {
     }
 }
 
-/// Assert an occurrence, by position in live resolution order, names the expected
-/// directory and file.
-fn assert_occurrence(
-    resolved: &Resolved,
-    position: usize,
-    directory_suffix: &str,
-    file_name: &str,
-) {
-    let Some(occurrence) = resolved.occurrences.get(position) else {
+/// Assert which copy a **newly started process** would run.
+///
+/// Every "who wins" claim below uses this rather than live order, deliberately.
+/// `fresh_winner` ignores process-only directories, which makes it independent of
+/// whatever the harness injected into this process — and harnesses inject plenty.
+/// `just` running recipes through a vendored MSYS `sh` put a second `git.exe` and
+/// `bash.exe` at the front of the live PATH and broke two assertions that had been
+/// keyed on live position.
+fn assert_fresh_winner(resolved: &Resolved, directory_suffix: &str, file_name: &str) {
+    let Some(winner) = resolved.fresh_winner() else {
         panic!(
-            "`{}` has no occurrence {position}; it has {}",
+            "`{}` would resolve from nowhere in a new process; occurrences: {:?}",
             resolved.stem,
-            resolved.occurrences.len()
+            directories(resolved)
         )
     };
 
     assert!(
-        occurrence.directory.ends_with(directory_suffix),
-        "`{}` occurrence {position} came from {:?}, expected something ending {directory_suffix:?}",
+        winner.directory.ends_with(directory_suffix),
+        "`{}` would resolve from {:?}, expected something ending {directory_suffix:?}",
         resolved.stem,
-        occurrence.directory
+        winner.directory
     );
-    assert_eq!(occurrence.file_name, file_name);
+    assert_eq!(winner.file_name, file_name);
+    // A fresh process has no runtime injection at all.
+    assert_ne!(winner.scope, PathScope::ProcessOnly);
+}
+
+/// Assert a copy exists in a given directory, without claiming anything about rank.
+fn assert_present_in(resolved: &Resolved, directory_suffix: &str, file_name: &str) {
+    assert!(
+        resolved.occurrences.iter().any(|occurrence| {
+            occurrence.directory.ends_with(directory_suffix) && occurrence.file_name == file_name
+        }),
+        "`{}` has no copy in a directory ending {directory_suffix:?}; occurrences: {:?}",
+        resolved.stem,
+        directories(resolved)
+    );
+}
+
+/// Assert one directory outranks another in composed order, which is the ordering
+/// the registry decides and no harness can disturb.
+fn assert_outranks(resolved: &Resolved, winner_suffix: &str, loser_suffix: &str) {
+    let index_of = |suffix: &str| {
+        resolved
+            .occurrences
+            .iter()
+            .find(|occurrence| occurrence.directory.ends_with(suffix))
+            .map(|occurrence| occurrence.entry_index)
+    };
+
+    match (index_of(winner_suffix), index_of(loser_suffix)) {
+        (Some(winner), Some(loser)) => assert!(
+            winner < loser,
+            "`{}`: {winner_suffix:?} is at index {winner}, expected it to precede \
+             {loser_suffix:?} at {loser}",
+            resolved.stem
+        ),
+        _ => panic!(
+            "`{}` is missing one of {winner_suffix:?} or {loser_suffix:?}; occurrences: {:?}",
+            resolved.stem,
+            directories(resolved)
+        ),
+    }
 }
 
 fn directories(resolved: &Resolved) -> Vec<&str> {
@@ -268,12 +316,12 @@ fn the_machine_scope_stores_its_windows_paths_as_references() {
 }
 
 #[test]
-fn the_registry_has_no_dead_entries_and_only_the_stray_separator() {
+fn the_registry_path_is_clean() {
     let report = report();
 
     // `Programs\Ollama` was pruned, so nothing on PATH in the registry is dead.
-    // A process started before the prune still carries it, which is why this looks
-    // only at registry entries — see the process-only test below.
+    // Deliberately scoped to registry entries: a process older than the prune still
+    // carries it, which is a fact about that process rather than the machine.
     let dead: Vec<&str> = from_registry(&report)
         .iter()
         .filter(|entry| entry.findings.contains(&Finding::Missing))
@@ -290,8 +338,8 @@ fn the_registry_has_no_dead_entries_and_only_the_stray_separator() {
         "stray separators in the registry value"
     );
 
-    // Nothing else. If a duplicate or an unreadable directory appears, it should
-    // fail here rather than hide behind the counts above.
+    // Nothing else at all. A duplicate or an unreadable directory should fail here
+    // rather than hide behind the counts above.
     for entry in from_registry(&report) {
         for finding in &entry.findings {
             assert_eq!(
@@ -305,31 +353,57 @@ fn the_registry_has_no_dead_entries_and_only_the_stray_separator() {
     }
 }
 
-#[test]
-fn a_pruned_entry_lingers_in_this_process_until_it_restarts() {
-    let report = report();
-    let injected = in_scope(&report, PathScope::ProcessOnly);
+// ---------------------------------------------------------------------------
+// Process-only entries: mechanisms and relationships, never counts.
+//
+// How many entries the running process can or cannot see is a property of that
+// process's history, not of the machine. Three observers disagreed on the same
+// afternoon and every one of them was right. A shell started before the trunk's
+// installs saw seven registry entries as unreachable. A long-lived shell that had
+// been given `$env:Path = machine + ';' + user` saw none, having dropped the
+// injected shim while keeping `FNM_MULTISHELL_PATH` set — a state impossible in a
+// clean shell. And a `cargo test` binary sees four extra injected directories that
+// cargo prepends.
+//
+// So nothing below counts anything. The arithmetic of live-versus-composed ordering
+// is unit-tested against synthetic PATHs in `executables.rs` and `compose.rs`, where
+// both sides are controlled. These only confirm the mechanism is real here.
+// ---------------------------------------------------------------------------
 
-    // Every process-only entry is, by definition, one this process can see.
-    for entry in &injected {
+#[test]
+fn a_process_only_entry_is_by_definition_one_this_process_can_see() {
+    let report = report();
+
+    for entry in in_scope(&report, PathScope::ProcessOnly) {
+        // The relationship that defines the scope: in the process block, in neither
+        // registry scope.
         assert!(
             entry.is_live(),
-            "{:?} has no live position",
+            "{:?} is process-only yet has no live position",
             entry.effective()
         );
+        // Nothing in the registry produced it, so there is no value kind to report.
         assert_eq!(entry.value_kind, None);
+        // Runtime injection lands after the registry block, never inside it.
         assert!(entry.index >= MACHINE_ENTRIES + USER_ENTRIES);
     }
+}
 
-    // `Programs\Ollama` was removed from the registry while this shell was
-    // running, so it survives in the process block alone — and it is still dead on
-    // disk, so it is still reported. Exactly the kind of thing that is invisible
-    // without comparing the two sources.
-    if let Some(ollama) = injected
-        .iter()
-        .find(|entry| entry.effective().ends_with(r"\Programs\Ollama"))
-    {
-        assert!(ollama.findings.contains(&Finding::Missing));
+#[test]
+fn a_registry_entry_without_a_live_position_is_not_an_error() {
+    let report = report();
+
+    // Whether any exist depends on when this process started, so that is not
+    // asserted. What is asserted is that being unseen is never itself a finding.
+    for entry in from_registry(&report) {
+        if !entry.is_live() {
+            assert!(
+                entry.findings.is_empty(),
+                "{:?} is merely unseen by this process, but was flagged {:?}",
+                entry.effective(),
+                entry.findings
+            );
+        }
     }
 }
 
@@ -432,29 +506,20 @@ fn git_for_windows_beats_both_vendored_copies() {
     let git = resolved(&report, "git");
 
     assert!(git.is_shadowed());
-    assert_eq!(
-        git.occurrences.len(),
-        3,
-        "expected three git.exe, found {:?}",
-        directories(git)
-    );
-
-    assert_occurrence(git, 0, GIT_FOR_WINDOWS_DIR, "git.exe");
-    assert_occurrence(git, 1, HERMES_GIT_CMD, "git.exe");
-    assert_occurrence(git, 2, HERMES_GIT_BIN, "git.exe");
     assert!(!git.is_pathext_only());
 
-    // Both questions have the same answer here, because every copy is on the live
-    // PATH and in the registry.
-    assert!(!git.winner_depends_on_context());
-    let Some(live) = git.live_winner() else {
-        panic!("a shadowed name with no live winner")
-    };
-    let Some(fresh) = git.fresh_winner() else {
-        panic!("a shadowed name with no fresh winner")
-    };
-    assert_eq!(live.directory, GIT_FOR_WINDOWS_DIR);
-    assert_eq!(fresh.directory, GIT_FOR_WINDOWS_DIR);
+    // Both vendored copies are present, and the real install outranks each of them.
+    // Not asserted as exactly three: a harness that injects an MSYS `sh` adds a
+    // fourth from hermes' `mingw64\bin`, and the count is then a fact about the
+    // harness. The ranking is the durable claim, and it is the one the spec makes.
+    assert_present_in(git, HERMES_GIT_CMD, "git.exe");
+    assert_present_in(git, HERMES_GIT_BIN, "git.exe");
+    assert_outranks(git, GIT_FOR_WINDOWS_DIR, HERMES_GIT_CMD);
+    assert_outranks(git, GIT_FOR_WINDOWS_DIR, HERMES_GIT_BIN);
+
+    // Machine PATH is composed before user PATH, which is the entire reason the real
+    // install wins here without anybody having intervened.
+    assert_fresh_winner(git, GIT_FOR_WINDOWS_DIR, "git.exe");
 }
 
 #[test]
@@ -467,24 +532,23 @@ fn the_vendored_unix_tools_are_named_even_though_nothing_competes_with_them() {
     for stem in ["gzip", "unzip", "sdiff"] {
         let tool = resolved(&report, stem);
 
-        assert!(
-            !tool.is_shadowed(),
-            "`{stem}` was expected to appear exactly once, found {:?}",
-            directories(tool)
-        );
-        assert_occurrence(tool, 0, HERMES_GIT_USR_BIN, &format!("{stem}.exe"));
+        // The point is provenance, not rank: nothing competes with these, and a
+        // conflicts-only report could never have named them.
+        assert_fresh_winner(tool, HERMES_GIT_USR_BIN, &format!("{stem}.exe"));
     }
 }
 
 #[test]
-fn bash_resolves_inside_hermes_twice_over() {
+fn bash_resolves_inside_hermes() {
     let report = report();
     let bash = resolved(&report, "bash");
 
-    assert!(bash.is_shadowed());
-    assert_eq!(bash.occurrences.len(), 2);
-    assert_occurrence(bash, 0, HERMES_GIT_BIN, "bash.exe");
-    assert_occurrence(bash, 1, HERMES_GIT_USR_BIN, "bash.exe");
+    // Two copies in the registry, both vendored. A harness running an MSYS `sh`
+    // adds more, so again the ranking is asserted and not the count.
+    assert_present_in(bash, HERMES_GIT_BIN, "bash.exe");
+    assert_present_in(bash, HERMES_GIT_USR_BIN, "bash.exe");
+    assert_outranks(bash, HERMES_GIT_BIN, HERMES_GIT_USR_BIN);
+    assert_fresh_winner(bash, HERMES_GIT_BIN, "bash.exe");
 }
 
 #[test]
@@ -492,7 +556,7 @@ fn python_resolves_from_local_bin_with_no_store_stub_left() {
     let report = report();
     let python = resolved(&report, "python");
 
-    assert_occurrence(python, 0, LOCAL_BIN, "python.exe");
+    assert_fresh_winner(python, LOCAL_BIN, "python.exe");
     assert!(
         !python.is_shadowed(),
         "expected one python.exe, found {:?}",
@@ -524,11 +588,11 @@ fn versioned_python_shims_are_separate_programs() {
     // `python3.11.exe` must not be filed under `python3`. Only the matched
     // PATHEXT extension comes off the end of a name.
     let python3 = resolved(&report, "python3");
-    assert_occurrence(python3, 0, LOCAL_BIN, "python3.exe");
+    assert_fresh_winner(python3, LOCAL_BIN, "python3.exe");
     assert!(!python3.is_shadowed());
 
     let pinned = resolved(&report, "python3.11");
-    assert_occurrence(pinned, 0, LOCAL_BIN, "python3.11.exe");
+    assert_fresh_winner(pinned, LOCAL_BIN, "python3.11.exe");
 }
 
 #[test]
@@ -540,19 +604,22 @@ fn our_uv_beats_the_vendored_one_on_user_path_order() {
     for stem in ["uv", "uvx", "uvw"] {
         let tool = resolved(&report, stem);
 
-        assert!(tool.is_shadowed(), "`{stem}` should appear twice");
-        assert_eq!(tool.occurrences.len(), 2);
-        assert_occurrence(tool, 0, WINGET_LINKS, &format!("{stem}.exe"));
-        assert_occurrence(tool, 1, HERMES_BIN, &format!("{stem}.exe"));
+        assert!(tool.is_shadowed(), "`{stem}` should appear more than once");
+        assert_present_in(tool, WINGET_LINKS, &format!("{stem}.exe"));
+        assert_present_in(tool, HERMES_BIN, &format!("{stem}.exe"));
+        assert_outranks(tool, WINGET_LINKS, HERMES_BIN);
+        assert_fresh_winner(tool, WINGET_LINKS, &format!("{stem}.exe"));
 
         // WinGet\Links holds symlinks to the real package, and the winner being a
         // reparse point is reported rather than resolved away. The other side of
         // this is `python.exe`, which is a real binary and must not be flagged.
+        let Some(winner) = tool.fresh_winner() else {
+            panic!("`{stem}` would resolve from nowhere")
+        };
         assert!(
-            tool.occurrences[0].is_reparse_point,
+            winner.is_reparse_point,
             "`{stem}` in WinGet\\Links is a symlink and should be reported as one"
         );
-        assert!(!tool.occurrences[1].is_reparse_point);
     }
 }
 
@@ -565,8 +632,10 @@ fn a_contest_inside_system32_is_decided_by_pathext_not_path() {
     // reordering PATH would change that.
     assert!(powercfg.is_shadowed());
     assert!(powercfg.is_pathext_only());
-    assert_occurrence(powercfg, 0, r"\WINDOWS\system32", "powercfg.exe");
-    assert_occurrence(powercfg, 1, r"\WINDOWS\system32", "powercfg.cpl");
+    assert_present_in(powercfg, r"\WINDOWS\system32", "powercfg.exe");
+    assert_present_in(powercfg, r"\WINDOWS\system32", "powercfg.cpl");
+    // Same directory, so PATHEXT rank breaks the tie and `.exe` outranks `.cpl`.
+    assert_fresh_winner(powercfg, r"\WINDOWS\system32", "powercfg.exe");
 }
 
 #[test]
@@ -580,11 +649,13 @@ fn node_is_the_live_example_of_a_context_dependent_winner() {
     let report = report();
     let node = resolved(&report, "node");
 
-    // Two copies since 2026-09-16: `fnm\aliases\default`, a registry entry, and
-    // the per-shell `fnm_multishells` shim, which is process-only.
+    // At least two copies since 2026-09-16: `fnm\aliases\default`, a registry entry,
+    // and the per-shell `fnm_multishells` shim, which is process-only. Not asserted
+    // as exactly two — how many copies a process can see is that process's history,
+    // and the relationship below is what actually matters.
     assert!(
         node.is_shadowed(),
-        "expected node.exe twice, found {:?}",
+        "expected node.exe more than once, found {:?}",
         directories(node)
     );
 

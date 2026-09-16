@@ -19,6 +19,13 @@ contract drift. Do not "fix" this by moving the derives into the CLI. What would
 genuinely breach rule 1 is a `Display` impl, a label, or a column width on a
 report type.
 
+**1b. Dependencies point at `winenv`, never from one tool at another.** Registry
+access lives in its own crate that knows nothing about `PATH` — no `;`, no
+machine-before-user, no notion of a directory. The env-var backup tool will depend
+on `winenv`, **not** on `pathdoc-core`, which would drag `PathEntry`, `Resolved` and
+`AuditReport` into a tool with no use for them. If something PATH-aware starts
+creeping into `winenv`, it belongs in `pathdoc-core` instead.
+
 **2. This tool is read-only.** No registry writes, no PATH edits, no fix mode,
 not even behind a flag. A tool that audits PATH and a tool that edits PATH have
 very different blast radii, and the second one needs a design for backups,
@@ -120,6 +127,22 @@ PowerShell at test time; shadowing does not, and automating it is on the roadmap
 - **A registry entry with no live position is not an error.** It is one the process
   started too early to see, and the only fix is a shell restart, which the table
   says out loud because nothing else in the report hints at it.
+- **`just` on Windows runs recipes through `sh`, and the `sh` here is hermes'
+  vendored MSYS shell.** It prepends `/mingw64/bin` and `/usr/bin`, so a recipe sees
+  a different `PATH` from the shell that invoked it — with a second `git.exe` and
+  `bash.exe` ahead of the real ones. It broke two acceptance assertions the first
+  time `just check` ran. The `justfile` now pins
+  `set shell := ["powershell.exe", "-NoProfile", "-Command"]`. Do not remove that
+  line, and be suspicious of any tool that runs commands for you on this machine:
+  the vendored `sh` is first on `PATH` and it rewrites the environment.
+- **Never assert a count that a harness can change.** Anything derived from the
+  process `PATH` — how many entries are unseen, how many copies of a name exist — is
+  a fact about the observing process. Assert relationships instead:
+  `fresh_winner()` ignores process-only directories and so is harness-independent,
+  and composed indices come from the registry, which no harness touches.
+- **`winget`'s installers append a trailing `;`.** That is where the `Empty` finding
+  on this machine keeps coming from. It does not accumulate — always exactly one or
+  none — and edits that rebuild the value from a filtered split remove it again.
 - Report reparse points rather than following them, so Store alias stubs stay
   identifiable. Live examples of both branches: `WinGet\Links\uv.exe` **is** a
   symlink, `~\.local\bin\python.exe` is not.
@@ -168,6 +191,17 @@ Keep the rule anyway. If a fixture with CRLF, a lone CR, or NUL bytes ever lands
 git normalising it would make the test meaningless, and that is exactly the kind of
 failure that wastes an afternoon. Do not relax it, and do not assume fixtures
 exist because the rule does.
+
+## Use the justfile
+
+`just check` is the gate: `fmt-check`, `clippy` in both feature configurations,
+`cargo nextest run --all-features`, then `cargo deny check`. It is what
+`project.manifest.json` points at, so both sessions and a human have one entry
+point that cannot drift from the docs.
+
+`pathdoc-core` must stay clean **without** the `serde` feature as well as with it,
+because a GUI linking the library may not want serde and that configuration is not
+otherwise built. `just lint` covers both; a bare `cargo clippy` does not.
 
 ## How the tests are laid out
 

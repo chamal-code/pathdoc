@@ -13,7 +13,7 @@
     "frameworks": [],
     "datastores": [],
     "keyDependencies": [
-      "winreg@=0.56.0",
+      "winreg@=0.56.0 (via the winenv crate only)",
       "clap@=4.6.7",
       "serde@=1.0.229",
       "serde_json@=1.0.151",
@@ -28,16 +28,19 @@
   },
   "commands": {
     "install": "cargo fetch",
-    "dev": "cargo run -p pathdoc-cli --",
-    "test": "cargo test",
-    "build": "cargo build --release"
+    "dev": "just run",
+    "test": "just test",
+    "build": "cargo build --release",
+    "check": "just check"
   },
   "entryPoints": [
+    "justfile",
     "crates/pathdoc-cli/src/main.rs",
     "crates/pathdoc-core/src/lib.rs",
+    "crates/winenv/src/lib.rs",
     "docs/SPEC.md"
   ],
   "graduatedFrom": null,
   "tags": ["windows", "cli", "rust", "diagnostics", "first-project"],
-  "notes": "First Rust project on this machine, chosen as a workflow shakedown. Read-only by design: it reports, it never writes PATH. Born from real PATH shadowing hit during machine provisioning on 2026-09-15. Slice 1 is complete - registry reading and composition (winreg, chosen over the windows crate so the unsafe stays in the dependency), per-entry findings, executable enumeration with PATHEXT read from the environment, shadow resolution for both the running process and a fresh one, and the output layer with a versioned JSON contract in docs/SPEC.md. A GUI is a confirmed consumer, so the serialisation shape is defined once in pathdoc-core behind a serde feature rather than mirrored in the front end; it is at schemaVersion 3. Schema 2 replaced a conflicts-only shadows array with a full executables array after three of the four names worth reporting turned out to appear exactly once; schema 3 added live process positions after the tool was found to name the wrong winner for any name present in both a runtime-injected directory and a registry one. Exit 1 is reserved for actionable per-entry findings; shadowing is reported always and gates only under --fail-on-shadow. The acceptance test doubles as a drift canary for the machine's PATH and has caught two unannounced changes; volatile counts are isolated at the top of it. Next is the roadmap: shell alias masking, decoding WindowsApps stubs, an env-var backup/diff tool sharing the registry layer, and an automated shadowing cross-check against Get-Command."
+  "notes": "First Rust project on this machine, chosen as a workflow shakedown. Read-only by design: it reports, it never writes PATH. Born from real PATH shadowing hit during machine provisioning on 2026-09-15. Slice 1 is complete - registry reading and composition (winreg, chosen over the windows crate so the unsafe stays in the dependency), per-entry findings, executable enumeration with PATHEXT read from the environment, shadow resolution for both the running process and a fresh one, and the output layer with a versioned JSON contract in docs/SPEC.md. A GUI is a confirmed consumer, so the serialisation shape is defined once in pathdoc-core behind a serde feature rather than mirrored in the front end; it is at schemaVersion 3. Schema 2 replaced a conflicts-only shadows array with a full executables array after three of the four names worth reporting turned out to appear exactly once; schema 3 added live process positions after the tool was found to name the wrong winner for any name present in both a runtime-injected directory and a registry one. Exit 1 is reserved for actionable per-entry findings; shadowing is reported always and gates only under --fail-on-shadow. The acceptance test doubles as a drift canary for the machine's PATH and has caught two unannounced changes; volatile counts are isolated at the top of it. Registry access has been extracted into a winenv crate that knows nothing about PATH, so the planned env-var tool depends on it rather than on pathdoc-core: dependencies point from each tool at winenv, never from one tool at another. Undecided: whether winenv moves to its own repository or is consumed from this one. Tooling entry point is the justfile - just check runs fmt, clippy in both feature configurations, nextest and cargo-deny. Next is the roadmap: shell alias masking, decoding WindowsApps stubs, the env-var backup/diff tool, and an automated shadowing cross-check against Get-Command."
 }
