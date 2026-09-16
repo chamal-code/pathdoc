@@ -89,7 +89,7 @@ certificate, so rather than pretend otherwise: verify the download instead.
 Every release ships `SHA256SUMS.txt`:
 
 ```powershell
-Get-FileHash .\pathdoc-0.1.0-x86_64-pc-windows-msvc.zip -Algorithm SHA256
+Get-FileHash .\pathdoc-0.1.1-x86_64-pc-windows-msvc.zip -Algorithm SHA256
 # then compare Hash against the matching line in SHA256SUMS.txt
 ```
 
@@ -158,7 +158,7 @@ A per-shell shim injected at the front of the live `PATH` beats a registry entry
 now and loses to it after a restart, so the output says which process a verdict
 describes, and flags any directory the running process cannot see yet.
 
-Version `0.1.0`, and deliberately not `1.0.0`. The JSON contract is at
+Version `0.1.1`, and deliberately not `1.0.0`. The JSON contract is at
 `schemaVersion` 4 and the roadmap still holds items that will change it — decoding
 `WindowsApps` stubs to their owning package, and an automated cross-check against
 `Get-Command`. Semver `0.x` says "this may still change", which is true; `1.0.0`
@@ -356,7 +356,7 @@ stays because a normalised fixture is a silently meaningless test.
 
 ## Testing
 
-174 tests, in three groups:
+175 tests, in three groups:
 
 - **Unit tests**, portable. Every input is explicit, including the environment
   lookup, so no machine's layout leaks into the logic. None of them asks an external

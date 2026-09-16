@@ -156,13 +156,37 @@ PowerShell at test time; shadowing does not, and automating it is on the roadmap
   a fact about the observing process. Assert relationships instead:
   `fresh_winner()` ignores process-only directories and so is harness-independent,
   and composed indices come from the registry, which no harness touches.
-- **Emitted output must be ASCII.** Windows consoles are frequently not UTF-8, so a
-  non-ASCII character in text the program prints arrives as mojibake — an em dash in
-  the interception note printed `ΓÇö`. Doc comments and Markdown are free to use
-  whatever they like; anything reaching a terminal is not. There is a test,
-  `rendered_output_is_ascii_only`, that renders every section including the
-  not-computed branches and fails on the first non-ASCII character. This is the same
-  rule global steering applies to `.ps1` files, for the same reason.
+- **Emitted output must be ASCII, and there is more than one thing that emits.**
+  Windows consoles are frequently not UTF-8, so a non-ASCII character in text the
+  program prints arrives as mojibake — an em dash in the interception note printed
+  `ΓÇö`. Doc comments and Markdown are free to use whatever they like; anything
+  reaching a terminal is not. Same rule global steering applies to `.ps1` files, for
+  the same reason.
+
+  Two renderers, and both need a test. `rendered_output_is_ascii_only` in `table.rs`
+  covers the report, including the not-computed branches.
+  `no_non_ascii_reaches_a_terminal` in `options.rs` covers **clap**, which is the trap:
+  in `crates/pathdoc-cli/src/options.rs` the doc comments *are* `--help`, so that one
+  file is emitted output even though every other doc comment in the workspace is not.
+  Four em dashes shipped in 0.1.0 that way while the table test passed throughout.
+
+  When adding a renderer, add the test with it. The clap test deliberately covers long
+  help, short help, `--version` and four error paths, because those are different code
+  paths through clap and a test that only checked `--help` would have caught the 0.1.0
+  bug and still missed the next one. `Options::command().render_long_help()` gets you
+  there in-process, with no subprocess.
+
+  Prove such a test fails. Reintroduce the character, watch it go red, then take it
+  back out. The 0.1.0 bug existed *alongside* a passing ASCII test, so "the test is
+  green" was already established as worthless evidence here.
+- **Do not edit repository text with `Set-Content -Encoding utf8`.** Windows PowerShell
+  5.1 writes a BOM, and `Get-Content -Raw` without `-Encoding UTF8` reads existing
+  UTF-8 as ANSI — so a read-modify-write round trip both adds a BOM and turns every em
+  dash into `â€”`. Hit while bumping the winget manifests: two of them silently gained
+  a BOM after I had verified and reported they had none. Use the editing tools, which
+  preserve encoding, and check afterwards with
+  `[IO.File]::ReadAllBytes($p)[0] -eq 0xEF`. A BOM matters in `SHA256SUMS.txt`, in
+  `GITHUB_ENV`, and in anything a non-Windows tool parses.
 - **Masking is shell-layer only, and the output has to say so.** A masked name is
   still perfectly reachable by anything doing a `PATH` search to spawn a process. The
   finding means "if you type this interactively", not "this binary is unreachable".

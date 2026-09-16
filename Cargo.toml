@@ -9,7 +9,7 @@ resolver = "3"
 # 0.x deliberately. The JSON contract is at schemaVersion 4 and roadmap items that
 # will change it are still outstanding, so semver 0.x is the accurate claim. 1.0.0
 # would promise a stability nobody has decided to offer.
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.98"
 license = "MIT OR Apache-2.0"

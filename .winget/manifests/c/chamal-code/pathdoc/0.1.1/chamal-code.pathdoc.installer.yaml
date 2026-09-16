@@ -1,0 +1,16 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.12.0.schema.json
+
+PackageIdentifier: chamal-code.pathdoc
+PackageVersion: 0.1.1
+InstallerType: zip
+NestedInstallerType: portable
+ReleaseDate: PENDING-RELEASE
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/chamal-code/pathdoc/releases/download/v0.1.1/pathdoc-0.1.1-x86_64-pc-windows-msvc.zip
+    InstallerSha256: PENDING-RELEASE-COPY-FROM-PUBLISHED-SHA256SUMS-TXT-DO-NOT-COMPUTE
+    NestedInstallerFiles:
+      - RelativeFilePath: pathdoc-0.1.1-x86_64-pc-windows-msvc\pathdoc.exe
+        PortableCommandAlias: pathdoc
+ManifestType: installer
+ManifestVersion: 1.12.0

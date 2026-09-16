@@ -529,6 +529,19 @@ Deliberately out of slice 1, in no particular order:
    writing a line of it.
 5. **Automated shadowing cross-check** against `Get-Command -All`, as described
    above.
+6. **A Windows version resource in the binary.** There is none today, verified:
+   `FileVersion`, `ProductVersion`, `ProductName`, `CompanyName`, `FileDescription`
+   and `LegalCopyright` are all empty, because Rust emits no `VERSIONINFO` by default.
+   The consequences are worth knowing rather than guessing at — Explorer's Properties
+   dialog shows nothing, `(Get-Item pathdoc.exe).VersionInfo` returns blanks so
+   PowerShell inventory cannot identify the file, and enterprise asset scanners see an
+   anonymous executable. No effect on winget, because a portable package creates no
+   Add/Remove Programs entry.
+
+   Fixable with `winres` or `embed-resource` in a `build.rs`, and deliberately **not**
+   a patch release: it adds a build-dependency, which means a new licence for
+   `cargo deny` to allow, and that allow-list is exact on purpose. A release whose
+   entire point is to be clean is the wrong place to change the dependency graph.
 
 ## Shell-level masking
 

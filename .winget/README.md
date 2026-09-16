@@ -8,16 +8,41 @@ repository, and these files are the copy that gets submitted there.
 Deliberately not wired into any workflow. Automating a submission that has not been
 made by hand once is premature, and the first one is where the fields get understood.
 
+## Current state: 0.1.1, incomplete on purpose
+
+**Nothing has been submitted to winget-pkgs yet.** `0.1.0` was prepared and then held:
+`--help` printed four em dashes as mojibake on a non-UTF-8 console, and a winget
+manifest pins an artifact URL and its hash, so shipping that would have cost a `0.1.1`
+release *plus* a second PR to a Microsoft repository to undo. Fixing first cost four
+characters.
+
+Two fields cannot be filled until the `v0.1.1` release exists, and they are set to
+placeholders that **fail `winget validate` on purpose**:
+
+```
+ReleaseDate:     PENDING-RELEASE
+InstallerSha256: PENDING-RELEASE-COPY-FROM-PUBLISHED-SHA256SUMS-TXT-DO-NOT-COMPUTE
+```
+
+Leaving the previous version's real values in place would have been worse than useless:
+the manifest would validate cleanly while pointing at the wrong artifact. A placeholder
+that cannot validate is a tripwire rather than a footgun, and `winget validate` names
+both fields explicitly, so neither can be forgotten.
+
+The three tagged URLs have been moved to `v0.1.1` but **cannot be verified until the tag
+is pushed** — they will 404 until then. Re-run the URL check below once the release
+exists.
+
 ## Layout
 
-`manifests/c/chamal-code/pathdoc/0.1.0/` mirrors the path these files occupy in
+`manifests/c/chamal-code/pathdoc/0.1.1/` mirrors the path these files occupy in
 winget-pkgs exactly, so a submission is a copy rather than a reconstruction. That path
 is not arbitrary: the first directory is the first letter of the identifier lowercased,
 then one directory per period-separated segment of the identifier — case sensitive —
 then the version.
 
 ```
-manifests/c/chamal-code/pathdoc/0.1.0/
+manifests/c/chamal-code/pathdoc/0.1.1/
   chamal-code.pathdoc.yaml                 version manifest
   chamal-code.pathdoc.installer.yaml       installer manifest
   chamal-code.pathdoc.locale.en-US.yaml    defaultLocale manifest
@@ -36,10 +61,10 @@ Every one of these carries the version. Eight lines across the three files, plus
 directory name and the release date — which is why this list exists rather than a
 vague "update the version".
 
-1. **Rename the version directory**, `0.1.0` to the new one.
+1. **Rename the version directory**, `0.1.1` to the new one.
 2. **`PackageVersion`** in all three files.
 3. **`InstallerUrl`** in the installer manifest. It carries the version *twice*, once
-   as the tag (`v0.1.0`) and once in the asset filename (`0.1.0`).
+   as the tag (`v0.1.1`) and once in the asset filename (`0.1.1`).
 4. **`InstallerSha256`**, copied from the release's published `SHA256SUMS.txt`. See
    below.
 5. **`RelativeFilePath`**, which embeds the version because the zip's top-level
@@ -49,19 +74,22 @@ vague "update the version".
    release API reports `published_at` in UTC; converting it to local time can move it
    a day.
 7. **The three tagged URLs** in the defaultLocale manifest: `LicenseUrl`,
-   `ReleaseNotesUrl` and the `Documentations` entry all point at `v0.1.0`. Leaving
+   `ReleaseNotesUrl` and the `Documentations` entry all point at `v0.1.1`. Leaving
    these behind is silent — the links resolve, they just describe the wrong version.
 
-Find every occurrence before editing:
+Find every occurrence before editing, substituting the version you are moving *from*:
 
 ```powershell
-Select-String -Path .\manifests\c\chamal-code\pathdoc\*\*.yaml -Pattern '0\.1\.0'
+Select-String -Path .\manifests\c\chamal-code\pathdoc\*\*.yaml -Pattern '0\.1\.1'
 ```
+
+Afterwards, run it again for the old version and expect zero hits. That is the check
+that catches items 5 and 7, the two that fail quietly.
 
 Then validate, from the repository root:
 
 ```powershell
-winget validate --manifest .\.winget\manifests\c\chamal-code\pathdoc\0.1.0\
+winget validate --manifest .\.winget\manifests\c\chamal-code\pathdoc\0.1.1\
 ```
 
 `winget validate` checks the manifests against the schema. It does **not** check that
@@ -70,7 +98,7 @@ archive, so check those too:
 
 ```powershell
 # every URL should answer 200
-Select-String -Path .\manifests\c\chamal-code\pathdoc\0.1.0\*.yaml -Pattern 'https://\S+' -AllMatches |
+Select-String -Path .\manifests\c\chamal-code\pathdoc\0.1.1\*.yaml -Pattern 'https://\S+' -AllMatches |
     ForEach-Object { $_.Matches.Value } |
     Where-Object { $_ -notlike '*aka.ms*' } | Sort-Object -Unique |
     ForEach-Object { "$((Invoke-WebRequest $_ -Method Head -UseBasicParsing).StatusCode)  $_" }

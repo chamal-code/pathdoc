@@ -1,4 +1,15 @@
 //! Command-line surface, as specified in `docs/SPEC.md`.
+//!
+//! # Every doc comment in this file is printed to a terminal
+//!
+//! clap turns these doc comments into `--help`, so unlike every other module in this
+//! workspace, the prose here is *emitted output* and must be ASCII. Four em dashes
+//! reached `--help` in 0.1.0 and rendered as `ΓÇö` on a console that was not UTF-8 —
+//! the same defect that had already been fixed in the report renderer, in a place the
+//! ASCII test did not look. `no_non_ascii_reaches_a_terminal` now covers it.
+//!
+//! Use `-` or a comma, not `—`. The `long_about` below already did; the field docs
+//! did not, which is exactly how it slipped through.
 
 use clap::{Parser, ValueEnum};
 use pathdoc_core::{PathEntry, PathScope, ShellScan};
@@ -31,7 +42,7 @@ use pathdoc_core::{PathEntry, PathScope, ShellScan};
 pub struct Options {
     /// Emit the report as JSON instead of a table.
     ///
-    /// A versioned, documented shape — see the JSON contract in `docs/SPEC.md`.
+    /// A versioned, documented shape: see the JSON contract in `docs/SPEC.md`.
     #[arg(long)]
     pub json: bool,
 
@@ -52,7 +63,7 @@ pub struct Options {
     /// A bare name such as `pwsh` is looked up in this audit's own results, so the
     /// interpreter is one the report vouches for. A value containing a separator is
     /// taken as a literal path. Defaults to Windows PowerShell, which exists on every
-    /// Windows machine — unlike `pwsh`, which is often a Store stub.
+    /// Windows machine, whereas `pwsh` is often a Store stub.
     #[arg(long = "shell", value_name = "NAME_OR_PATH")]
     pub shells: Vec<String>,
 
@@ -96,8 +107,8 @@ pub enum ShellScanArg {
     /// Do not ask. No process is spawned, and the report says masking was not
     /// checked rather than reporting nothing masked.
     Off,
-    /// Ask without loading a user profile. Sees built-in aliases and functions —
-    /// `sc`, `where`, `curl`, `more` — and has no side effects.
+    /// Ask without loading a user profile. Sees built-in aliases and functions such
+    /// as `sc`, `where`, `curl` and `more`, and has no side effects.
     NoProfile,
     /// Ask with the user profile loaded.
     ///
@@ -110,8 +121,8 @@ pub enum ShellScanArg {
 /// Which `PATH` scopes to report on.
 ///
 /// A display filter only. Entries keep the index they hold in the full composed
-/// order, so a filtered report still says where each entry really sits — which
-/// is the whole point of composing machine before user in the first place.
+/// order, so a filtered report still says where each entry really sits, which is
+/// the whole point of composing machine before user in the first place.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum ScopeFilter {
     /// Everything, including directories injected at runtime.
@@ -125,7 +136,7 @@ pub enum ScopeFilter {
 #[cfg(test)]
 mod tests {
     use super::{Options, ScopeFilter};
-    use clap::Parser;
+    use clap::{CommandFactory, Parser};
     use pathdoc_core::{PathEntry, PathScope};
 
     fn entry(scope: PathScope) -> PathEntry {
@@ -197,6 +208,59 @@ mod tests {
     #[test]
     fn an_unknown_scope_is_rejected() {
         assert!(Options::try_parse_from(["pathdoc", "--scope", "registry"]).is_err());
+    }
+
+    #[test]
+    fn no_non_ascii_reaches_a_terminal() {
+        // The bug this exists for: four em dashes in the doc comments above reached
+        // `--help` and printed as "ΓÇö" on a console that was not UTF-8. The report
+        // renderer already had a test for exactly this class of defect, and it passed
+        // throughout, because clap's generated output is a second renderer that nothing
+        // was looking at.
+        //
+        // So this covers everything clap can print, not just long help. Short help,
+        // long help and `--version` take different paths through clap, and an error
+        // message is a fourth. A test that checked only `--help` would have caught the
+        // 0.1.0 bug and would still miss the next one.
+        let mut command = Options::command();
+
+        let mut rendered: Vec<(String, String)> = vec![
+            (
+                "long help".to_owned(),
+                command.render_long_help().to_string(),
+            ),
+            ("short help".to_owned(), command.render_help().to_string()),
+            ("version".to_owned(), command.render_version()),
+        ];
+
+        // Error paths, which clap formats itself from the same metadata. An unknown
+        // value quotes the possible values, so a non-ASCII variant name would surface
+        // here and nowhere else.
+        for args in [
+            vec!["pathdoc", "--scope", "nonsense"],
+            vec!["pathdoc", "--shell-scan", "nonsense"],
+            vec!["pathdoc", "--not-a-flag"],
+            vec!["pathdoc", "--shell"],
+        ] {
+            let Err(err) = Options::try_parse_from(&args) else {
+                panic!("{args:?} should not have parsed");
+            };
+            rendered.push((format!("error for {args:?}"), err.to_string()));
+        }
+
+        for (what, text) in rendered {
+            assert!(
+                !text.is_empty(),
+                "{what} rendered nothing, so it proved nothing"
+            );
+            if let Some(offender) = text.chars().find(|c| !c.is_ascii()) {
+                panic!(
+                    "{what} contains {offender:?} (U+{:04X}); it will print as mojibake on a \
+                     console that is not UTF-8",
+                    offender as u32
+                );
+            }
+        }
     }
 
     #[test]
