@@ -191,6 +191,7 @@ crates/pathdoc-cli/                 binary `pathdoc`: all formatting lives here
 docs/SPEC.md                        specification, JSON contract, roadmap
 .github/workflows/check.yml         CI: the gate, read-only
 .github/workflows/release.yml       tag-triggered release, the only job that can write
+.winget/                            winget manifests, plus what changes per release
 .kiro/steering/00-project.md        rules and gotchas for anyone working on this
 ```
 
@@ -493,6 +494,14 @@ The artifact is a zip, not a bare `.exe`: `pathdoc.exe`, `LICENSE-APACHE`,
 section 4 requires the licence to travel with a redistribution, and a lone executable
 does not carry it — the same class of gap as declaring a licence in `Cargo.toml` with
 no files behind it, which this repository also had until it was caught.
+
+The `winget` manifests for a release live in [`.winget/`](.winget/), which mirrors the
+path they occupy in `winget-pkgs` so a submission is a copy rather than a
+reconstruction. They are deliberately outside the workflow: automating a submission
+that has not been made by hand once is premature. `.winget/README.md` lists what
+changes per release, which is more than the version — the tagged `LicenseUrl`,
+`ReleaseNotesUrl` and documentation links carry it too, and getting those wrong is
+silent because the links still resolve.
 
 ## Licence
 
