@@ -31,19 +31,40 @@ set windows-shell := ["powershell.exe", "-NoProfile", "-Command"]
 default:
     @just --list
 
-# Everything CI would run, in the order that fails fastest.
+# The full gate for THIS machine. Includes the machine-specific acceptance tests, so
+# it fails anywhere else by design — see `check-portable` for CI.
+
+# Everything, in the order that fails fastest. Use on the machine pathdoc describes.
 check: fmt-check lint test deny
 
-# Run the whole test suite.
+# What CI should run, and the only gate that is safe off this machine. Same checks,
+# minus the acceptance tests that describe one particular registry.
+
+# The portable gate: no machine-specific tests.
+check-portable: fmt-check lint test-portable deny
+
+# `--run-ignored all` is what keeps the machine-specific acceptance tests inside the
+# gate. They carry `#[ignore]` so that a plain `cargo test` on somebody else's clone
+# passes and skips them, but on this machine they are exactly the tests worth running
+# on every commit — they have caught two unannounced PATH changes.
+
+# Run the whole test suite, machine-specific tests included.
 test:
+    cargo nextest run --all-features --run-ignored all
+
+# What a stranger's fresh clone sees: no machine-specific tests, no skips to explain.
+# Useful for checking the public experience without leaving this machine.
+
+# Run only the portable tests, as an outside contributor would.
+test-portable:
     cargo nextest run --all-features
 
 # When this fails the machine changed. Ask the trunk what it did before touching a
 # number in it.
 
-# Run only the machine-specific acceptance test, with output shown.
+# Run only the machine-specific acceptance tests, with output shown.
 test-machine:
-    cargo nextest run -p pathdoc-core --test this_machine --no-capture
+    cargo nextest run -p pathdoc-core --test this_machine --run-ignored all --no-capture
 
 # The second run is not redundant: `pathdoc-core` must stay clean without `serde`
 # too, because a GUI linking the library directly may not want it, and no other

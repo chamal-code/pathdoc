@@ -4,6 +4,21 @@
 //! expected to fail anywhere else, which is why it is an integration test of its
 //! own instead of leaking into the unit tests, which stay portable.
 //!
+//! # Ignored by default, and deliberately still in the gate
+//!
+//! Every test here carries `#[ignore]`, so a plain `cargo test` on a fresh clone
+//! passes and reports them skipped. That is the correct result off this machine: the
+//! assertions are about one machine's registry, and a stranger has a different one.
+//!
+//! On this machine they still run on every gate, because `just test` passes
+//! `--run-ignored all`. That was the point of not simply excluding them — the drift
+//! canary has caught two real unannounced changes, and a canary outside the gate is
+//! a canary nobody looks at. `just test-machine` runs only these, with output.
+//!
+//! Do not remove the `#[ignore]` attributes to "fix" a skipped count, and do not
+//! drop them from `just check` to make a stranger's clone greener. Both halves are
+//! load-bearing.
+//!
 //! # When this fails, the machine changed
 //!
 //! **Do not adjust a number to make it pass.** Find out what moved first. Two
@@ -224,6 +239,7 @@ fn powershell_scope(scope: &str) -> Vec<String> {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[ignore = "machine-specific: see `just test-machine`"]
 fn scope_counts_match_the_verified_baseline() {
     let report = report();
     let machine = in_scope(&report, PathScope::Machine);
@@ -239,6 +255,7 @@ fn scope_counts_match_the_verified_baseline() {
 }
 
 #[test]
+#[ignore = "machine-specific: see `just test-machine`"]
 fn both_scopes_are_stored_expandable() {
     let report = report();
 
@@ -258,6 +275,7 @@ fn both_scopes_are_stored_expandable() {
 }
 
 #[test]
+#[ignore = "machine-specific: see `just test-machine`"]
 fn pinned_indices_are_where_windows_puts_them() {
     let report = report();
 
@@ -290,6 +308,7 @@ fn pinned_indices_are_where_windows_puts_them() {
 }
 
 #[test]
+#[ignore = "machine-specific: see `just test-machine`"]
 fn the_machine_scope_stores_its_windows_paths_as_references() {
     let report = report();
 
@@ -316,6 +335,7 @@ fn the_machine_scope_stores_its_windows_paths_as_references() {
 }
 
 #[test]
+#[ignore = "machine-specific: see `just test-machine`"]
 fn the_registry_path_is_clean() {
     let report = report();
 
@@ -371,6 +391,7 @@ fn the_registry_path_is_clean() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[ignore = "machine-specific: see `just test-machine`"]
 fn a_process_only_entry_is_by_definition_one_this_process_can_see() {
     let report = report();
 
@@ -390,6 +411,7 @@ fn a_process_only_entry_is_by_definition_one_this_process_can_see() {
 }
 
 #[test]
+#[ignore = "machine-specific: see `just test-machine`"]
 fn a_registry_entry_without_a_live_position_is_not_an_error() {
     let report = report();
 
@@ -408,6 +430,7 @@ fn a_registry_entry_without_a_live_position_is_not_an_error() {
 }
 
 #[test]
+#[ignore = "machine-specific: see `just test-machine`"]
 fn the_fnm_shim_is_process_only_and_carries_no_findings() {
     let process = std::env::var("PATH").unwrap_or_default();
     if !process.to_lowercase().contains("fnm_multishells") {
@@ -455,6 +478,7 @@ fn the_fnm_shim_is_process_only_and_carries_no_findings() {
 }
 
 #[test]
+#[ignore = "machine-specific: see `just test-machine`"]
 fn composed_order_matches_powershell() {
     let report = report();
 
@@ -491,6 +515,7 @@ fn composed_order_matches_powershell() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[ignore = "machine-specific: see `just test-machine`"]
 fn pathext_is_longer_than_the_documented_default_on_this_machine() {
     // The reason PATHEXT is read from the environment rather than hard-coded:
     // this machine carries `.CPL` as well, and `powercfg.cpl` sits beside
@@ -501,6 +526,7 @@ fn pathext_is_longer_than_the_documented_default_on_this_machine() {
 }
 
 #[test]
+#[ignore = "machine-specific: see `just test-machine`"]
 fn git_for_windows_beats_both_vendored_copies() {
     let report = report();
     let git = resolved(&report, "git");
@@ -523,6 +549,7 @@ fn git_for_windows_beats_both_vendored_copies() {
 }
 
 #[test]
+#[ignore = "machine-specific: see `just test-machine`"]
 fn the_vendored_unix_tools_are_named_even_though_nothing_competes_with_them() {
     let report = report();
 
@@ -539,6 +566,7 @@ fn the_vendored_unix_tools_are_named_even_though_nothing_competes_with_them() {
 }
 
 #[test]
+#[ignore = "machine-specific: see `just test-machine`"]
 fn bash_resolves_inside_hermes() {
     let report = report();
     let bash = resolved(&report, "bash");
@@ -552,6 +580,7 @@ fn bash_resolves_inside_hermes() {
 }
 
 #[test]
+#[ignore = "machine-specific: see `just test-machine`"]
 fn python_resolves_from_local_bin_with_no_store_stub_left() {
     let report = report();
     let python = resolved(&report, "python");
@@ -582,6 +611,7 @@ fn python_resolves_from_local_bin_with_no_store_stub_left() {
 }
 
 #[test]
+#[ignore = "machine-specific: see `just test-machine`"]
 fn versioned_python_shims_are_separate_programs() {
     let report = report();
 
@@ -596,6 +626,7 @@ fn versioned_python_shims_are_separate_programs() {
 }
 
 #[test]
+#[ignore = "machine-specific: see `just test-machine`"]
 fn our_uv_beats_the_vendored_one_on_user_path_order() {
     let report = report();
 
@@ -624,6 +655,7 @@ fn our_uv_beats_the_vendored_one_on_user_path_order() {
 }
 
 #[test]
+#[ignore = "machine-specific: see `just test-machine`"]
 fn a_contest_inside_system32_is_decided_by_pathext_not_path() {
     let report = report();
     let powercfg = resolved(&report, "powercfg");
@@ -639,6 +671,7 @@ fn a_contest_inside_system32_is_decided_by_pathext_not_path() {
 }
 
 #[test]
+#[ignore = "machine-specific: see `just test-machine`"]
 fn node_is_the_live_example_of_a_context_dependent_winner() {
     let process = std::env::var("PATH").unwrap_or_default();
     if !process.to_lowercase().contains("fnm_multishells") {
@@ -686,6 +719,7 @@ fn node_is_the_live_example_of_a_context_dependent_winner() {
 }
 
 #[test]
+#[ignore = "machine-specific: see `just test-machine`"]
 fn enumeration_ran_and_nothing_on_this_path_refused_to_open() {
     let report = report();
 

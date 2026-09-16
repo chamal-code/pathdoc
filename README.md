@@ -97,9 +97,11 @@ another.
 
 ```powershell
 just                        # list the recipes
-just check                  # fmt, clippy in both feature sets, tests, licence gates
-just test                   # cargo nextest run --all-features
-just test-machine           # only the machine-specific acceptance test
+just check                  # the full gate for the machine pathdoc describes
+just check-portable         # the same gate minus machine-specific tests: use this in CI
+just test                   # everything, machine-specific tests included
+just test-portable          # only the portable tests, as an outside clone sees them
+just test-machine           # only the machine-specific acceptance tests
 just audit                  # release build, run without cargo's extra PATH entries
 just run --json             # pass flags through to the debug build
 ```
@@ -212,14 +214,32 @@ stays because a normalised fixture is a silently meaningless test.
 
 - **Unit tests**, portable. Every input is explicit, including the environment
   lookup, so no machine's layout leaks into the logic.
-- **`tests/this_machine.rs`**, the acceptance test. Deliberately machine-specific
-  and expected to fail elsewhere. Composition order is cross-checked at run time
-  against `[Environment]::GetEnvironmentVariable('Path', ...)` rather than
-  hard-coded. Volatile counts sit in one marked block at the top; everything else is
-  keyed on directory names so installing something does not invalidate it. When it
-  goes red the machine changed — find out what before touching a number.
 - **Contract tests** in `json.rs`, pinning every JSON field name and enum tag, so
   breaking the contract a GUI depends on breaks a test.
+- **`tests/this_machine.rs`**, 19 acceptance tests. Deliberately machine-specific:
+  they describe the registry of the machine this was written on. Composition order is
+  cross-checked at run time against
+  `[Environment]::GetEnvironmentVariable('Path', ...)` rather than hard-coded.
+  Volatile counts sit in one marked block at the top; everything else is keyed on
+  directory names so installing something does not invalidate them.
+
+### If you have cloned this, 19 tests will skip, and that is correct
+
+```
+cargo test
+...
+test result: ok. 0 passed; 0 failed; 19 ignored
+```
+
+Those are the machine-specific ones. They carry `#[ignore]` precisely so that a
+fresh clone passes: their assertions are about one machine's `PATH`, and yours is
+different. Nothing is wrong, and there is nothing to fix.
+
+On the machine they describe they still run on every commit, because `just test`
+passes `--run-ignored all`. That combination is deliberate — excluding them outright
+would have been simpler and would have thrown away a drift canary that has caught
+two unannounced `PATH` changes. `just test-portable` shows exactly what you see;
+`just test-machine` runs only them.
 
 ## Licence
 

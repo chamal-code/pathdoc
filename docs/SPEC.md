@@ -345,6 +345,12 @@ pins the composition itself — 8 machine entries, 14 user, 22 composed,
 `C:\Program Files\Git\cmd` at index 7, the first user entry at index 8 — and the
 `PATHEXT`, versioned-shim and reparse-point behaviour described above.
 
+Those 19 tests are all `#[ignore]`d, so a fresh clone elsewhere passes and skips
+them — the assertions describe one machine's registry and a stranger has a different
+one. They still run on every gate here, because `just test` passes
+`--run-ignored all`. Excluding them outright would have been simpler and would have
+put the drift canary outside the gate.
+
 `this_machine.rs` is the **single source of truth** for the expected numbers.
 Earlier drafts of this file, the README and the machine's toolchain steering all
 repeated them in prose, which meant four places to update and three of them

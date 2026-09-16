@@ -31,7 +31,8 @@
     "dev": "just run",
     "test": "just test",
     "build": "cargo build --release",
-    "check": "just check"
+    "check": "just check",
+    "checkPortable": "just check-portable"
   },
   "entryPoints": [
     "justfile",

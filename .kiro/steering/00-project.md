@@ -210,10 +210,14 @@ exist because the rule does.
 
 ## Use the justfile
 
-`just check` is the gate: `fmt-check`, `clippy` in both feature configurations,
-`cargo nextest run --all-features`, then `cargo deny check`. It is what
+`just check` is the gate here: `fmt-check`, `clippy` in both feature configurations,
+the tests including the machine-specific ones, then `cargo deny check`. It is what
 `project.manifest.json` points at, so both sessions and a human have one entry
 point that cannot drift from the docs.
+
+**CI must use `just check-portable`, not `just check`.** `check` runs the acceptance
+tests via `--run-ignored all` and so fails anywhere that is not this machine.
+`check-portable` is the same gate with `test-portable` in place of `test`.
 
 `pathdoc-core` must stay clean **without** the `serde` feature as well as with it,
 because a GUI linking the library may not want serde and that configuration is not
@@ -226,8 +230,25 @@ Worth knowing before adding one:
 | Where | Kind | Rule |
 | --- | --- | --- |
 | `crates/*/src/*.rs`, `mod tests` | unit | Portable. Every input explicit, including the environment lookup. |
-| `crates/pathdoc-core/tests/this_machine.rs` | acceptance | Machine-specific on purpose. Expected to fail elsewhere. |
+| `crates/pathdoc-core/tests/this_machine.rs` | acceptance | Machine-specific on purpose. All `#[ignore]`. |
 | `crates/pathdoc-cli/src/json.rs`, `mod tests` | contract | Pins field names and enum tags. Breaking the JSON contract must break a test. |
+
+The acceptance tests are `#[ignore]`d so a stranger's `cargo test` on a fresh clone
+passes and reports 19 skipped, which is the correct answer off this machine. They
+still gate here, because `just test` passes `--run-ignored all`.
+
+**Both halves are load-bearing.** Do not strip the `#[ignore]` attributes to tidy up
+a skipped count, and do not drop `--run-ignored all` from the justfile to make an
+outside clone greener — that would leave the drift canary outside the gate, which is
+a canary nobody looks at. Any new test in that file needs the attribute too:
+
+```rust
+#[test]
+#[ignore = "machine-specific: see `just test-machine`"]
+```
+
+`just test-portable` is the stranger's view, for checking the public experience
+without leaving this machine.
 
 Renderer tests write into an `anstream::StripStream` over a buffer, so assertions
 read as the plain text a user sees while production still emits real ANSI. One
