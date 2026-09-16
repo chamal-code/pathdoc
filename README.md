@@ -241,6 +241,29 @@ would have been simpler and would have thrown away a drift canary that has caugh
 two unannounced `PATH` changes. `just test-portable` shows exactly what you see;
 `just test-machine` runs only them.
 
+## CI
+
+`.github/workflows/check.yml`, two jobs, and the split is forced by the code rather
+than chosen:
+
+- **windows-latest** runs `just check-portable` — formatting, clippy in both feature
+  configurations, the portable tests, and the licence and advisory gates. It then
+  builds the release binary and audits the runner's own `PATH`, which is the only way
+  to prove the tool works on a machine it was not written on. `pathdoc` exiting 1
+  there is a pass: it means findings were reported.
+- **ubuntu-latest** runs only `just fmt-check` and `just deny`.
+
+Linux is limited to those two because **this workspace cannot be built for Linux at
+all**: `pathdoc-core` reads file attributes through
+`std::os::windows::fs::MetadataExt` so a reparse point is reported rather than
+followed, and `winenv` depends on `winreg`. A Linux build job would fail for a reason
+that has nothing to do with the code being wrong.
+
+That job still earns its place. It is the only thing that exercises
+`set windows-shell` in the justfile — with `set shell` those two recipes would try to
+spawn `powershell.exe` on Ubuntu. And `cargo deny` resolves the graph for the target
+named in `deny.toml`, so the licence verdict is host-independent.
+
 ## Licence
 
 Dual licensed under either of

@@ -256,9 +256,13 @@ mod tests {
     }
 
     #[test]
-    fn the_machine_path_is_readable_and_stored_expandable() {
-        // Portable across Windows machines: HKLM always defines PATH, and Windows
-        // stores it as REG_EXPAND_SZ.
+    fn the_machine_path_is_readable_as_a_string_value() {
+        // HKLM always defines Path on Windows. The kind is asserted only to be one of
+        // the two string kinds: whether it is specifically REG_EXPAND_SZ is a fact
+        // about how a given machine was configured, and something that appends via
+        // `[Environment]::SetEnvironmentVariable` will have flattened it to REG_SZ.
+        // The strict version belongs in `this_machine.rs`, where it is checked against
+        // a machine somebody has actually looked at.
         let value = match read(Scope::Machine, "Path") {
             Ok(Some(value)) => value,
             Ok(None) => panic!("the machine scope has no Path"),
@@ -266,17 +270,35 @@ mod tests {
         };
 
         assert!(!value.text.is_empty());
-        assert_eq!(value.kind, ValueKind::ExpandSz);
+        assert!(
+            matches!(value.kind, ValueKind::Sz | ValueKind::ExpandSz),
+            "expected a string kind, got {}",
+            value.kind
+        );
     }
 
     #[test]
     fn values_come_back_unexpanded() {
-        // The property everything else depends on. Every Windows machine stores
-        // system32 as a `%SystemRoot%` reference in the machine block.
+        // The property everything else depends on. Windows ships the machine Path
+        // holding `%SystemRoot%` references, so on an untouched machine there is
+        // something to check.
         let value = match read(Scope::Machine, "Path") {
             Ok(Some(value)) => value,
             other => panic!("cannot read the machine Path: {other:?}"),
         };
+
+        if value.kind != ValueKind::ExpandSz || !value.text.contains('%') {
+            // Nothing to prove: this machine's Path holds no references, so an
+            // expanding read and a non-expanding one would return the same bytes.
+            // Said out loud rather than passing quietly, so a vacuous pass is not
+            // mistaken for a verified one. `this_machine.rs` asserts the strict
+            // version against real `%SystemRoot%` entries.
+            eprintln!(
+                "skipped: the machine Path holds no environment references here, \
+                 so unexpanded reading cannot be distinguished"
+            );
+            return;
+        }
 
         assert!(
             value.text.contains('%'),
@@ -298,18 +320,24 @@ mod tests {
 
     #[test]
     fn names_can_be_enumerated() {
-        // The half a backup-and-diff tool needs. Both scopes define Path, whatever
-        // else they hold.
-        for scope in [Scope::Machine, Scope::User] {
-            let names = match names(scope) {
-                Ok(names) => names,
-                Err(err) => panic!("cannot enumerate {scope}: {err}"),
-            };
+        // The half a backup-and-diff tool needs.
+        //
+        // Only the machine scope is asserted to define `Path`. Windows always does,
+        // whereas a user profile with no variables of its own is perfectly legal —
+        // a fresh CI runner is the obvious case — so requiring one there would be
+        // asserting a fact about this machine in a portable test.
+        let machine = match names(Scope::Machine) {
+            Ok(names) => names,
+            Err(err) => panic!("cannot enumerate {}: {err}", Scope::Machine),
+        };
+        assert!(
+            machine.iter().any(|name| name.eq_ignore_ascii_case("path")),
+            "the machine scope defines no Path; got {machine:?}"
+        );
 
-            assert!(
-                names.iter().any(|name| name.eq_ignore_ascii_case("path")),
-                "{scope} defines no Path; got {names:?}"
-            );
+        // For the user scope the portable claim is only that enumeration works.
+        if let Err(err) = names(Scope::User) {
+            panic!("cannot enumerate {}: {err}", Scope::User);
         }
     }
 }

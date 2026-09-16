@@ -1,0 +1,111 @@
+# CI for pathdoc.
+#
+# Two jobs, because this workspace is Windows-only and that constrains what can be
+# checked where. `pathdoc-core` uses `std::os::windows::fs::MetadataExt` to read file
+# attributes without following reparse points, and `winenv` depends on `winreg`, so
+# nothing here compiles for a Linux target. A Linux job that tried to build would
+# fail for a reason that has nothing to do with the code being wrong.
+#
+# So: Windows runs the real gate, Linux runs only the recipes that never invoke the
+# compiler. That Linux job is not decoration — it is the only thing that exercises
+# `set windows-shell` in the justfile. Had that been `set shell`, these two recipes
+# would try to spawn `powershell.exe` on Ubuntu and fail.
+#
+# Note `just check-portable` and not `just check`: `check` runs the machine-specific
+# acceptance tests via `--run-ignored all`, and those describe one particular
+# machine's registry. On a runner they must skip, which is what `check-portable`
+# arranges. A green Windows job reporting 19 skipped is the correct outcome.
+
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Read-only. Nothing here needs to write to the repository.
+permissions:
+  contents: read
+
+# A superseded run on the same ref is wasted minutes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    name: gate (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Prebuilt binaries. The alternative, `cargo install --locked`, needs no
+      # third-party action but builds cargo-deny from source on every run, which
+      # costs minutes. Worth revisiting if the trust boundary matters more than the
+      # time; pinning these to full commit SHAs rather than major tags would be the
+      # next tightening either way.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,cargo-nextest,cargo-deny
+
+      # The toolchain comes from rust-toolchain.toml, which pins the stable channel
+      # and the rustfmt and clippy components.
+      - run: rustc --version && cargo --version
+
+      # fmt-check, clippy in both feature configurations, the portable tests, then
+      # the licence and advisory gates.
+      - run: just check-portable
+
+      # Prove the binary actually runs on a machine that is not the one it was
+      # written on, and that it audits that machine rather than erroring. Exit 1 is a
+      # legitimate result here: it means findings were reported.
+      # Note the explicit `exit 0`. A pwsh step fails if $LASTEXITCODE is non-zero
+      # when the script ends, and exit 1 from pathdoc means "findings reported",
+      # which is a perfectly good outcome on a machine nobody has tidied.
+      - name: run the audit against the runner's own PATH
+        shell: pwsh
+        run: |
+          cargo build --release -p pathdoc-cli
+          ./target/release/pathdoc.exe --no-color
+          $code = $LASTEXITCODE
+          if ($code -ne 0 -and $code -ne 1) {
+            Write-Error "pathdoc exited $code, expected 0 (clean) or 1 (findings)"
+            exit 1
+          }
+          Write-Host "pathdoc exited $code"
+          exit 0
+
+      # The JSON contract is what a GUI consumes, so check it parses and carries the
+      # schema version rather than only that the process exited.
+      - name: the JSON contract parses
+        shell: pwsh
+        run: |
+          $report = ./target/release/pathdoc.exe --json | ConvertFrom-Json
+          if ($report.schemaVersion -ne 3) {
+            Write-Error "schemaVersion was $($report.schemaVersion), expected 3"
+            exit 1
+          }
+          if (-not $report.entries) { Write-Error 'no entries in the report'; exit 1 }
+          if (-not $report.capabilities) { Write-Error 'no capabilities'; exit 1 }
+          Write-Host "schemaVersion $($report.schemaVersion), $($report.entries.Count) entries, $($report.executables.Count) names"
+          exit 0
+
+  linux:
+    name: platform-independent recipes (linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,cargo-deny
+
+      # Neither of these invokes the compiler, so both work on a host this code
+      # cannot be built for. `cargo deny` resolves the dependency graph for the
+      # target named in deny.toml, so the licence verdict is host-independent.
+      - run: just fmt-check
+      - run: just deny

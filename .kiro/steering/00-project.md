@@ -219,6 +219,25 @@ point that cannot drift from the docs.
 tests via `--run-ignored all` and so fails anywhere that is not this machine.
 `check-portable` is the same gate with `test-portable` in place of `test`.
 
+### The CI split is forced, not a preference
+
+`.github/workflows/check.yml` runs the full portable gate on `windows-latest` and
+only `fmt-check` and `deny` on `ubuntu-latest`.
+
+**Do not add a Linux build or test job.** This workspace cannot be compiled for
+Linux: `executables.rs` uses `std::os::windows::fs::MetadataExt` to read file
+attributes without following reparse points, and `winenv` depends on `winreg`. A
+Linux build fails for a reason unrelated to the code being wrong, and "fixing" it
+would mean giving up reparse-point detection, which is a spec requirement.
+
+The Linux job is not decoration: it is the only thing that exercises
+`set windows-shell`, since with `set shell` those two recipes would try to spawn
+`powershell.exe` on Ubuntu.
+
+One trap when adding a `pwsh` step: the step fails if `$LASTEXITCODE` is non-zero
+when the script ends, and `pathdoc` exits 1 whenever it reports findings — which is
+the normal case. Capture the code, check it, and end with an explicit `exit 0`.
+
 `pathdoc-core` must stay clean **without** the `serde` feature as well as with it,
 because a GUI linking the library may not want serde and that configuration is not
 otherwise built. `just lint` covers both; a bare `cargo clippy` does not.
