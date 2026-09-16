@@ -24,15 +24,24 @@ not have to.
 
 ## Non-goals
 
-Explicit, and important for slice 1:
+Explicit, and load-bearing:
 
 - **It never writes.** No PATH edits, no registry writes, no "fix it for me".
   Mutation is a later slice, if ever, and would require its own design for
   backups and confirmation.
-- Not a `which` replacement. It audits the whole PATH rather than resolving one name.
-- No GUI. The core crate stays presentation-free so a GUI can consume it later.
+- Not a `which` replacement. It audits the whole PATH rather than resolving one
+  name on request. This is why the table reports contested names only and leaves
+  the full list of around a thousand to `--json`: there is deliberately no
+  `pathdoc <name>` verb.
+- **No GUI in this repository.** A GUI is a confirmed future consumer, but it
+  lives elsewhere and links `pathdoc-core` directly. That is the whole reason the
+  core crate stays presentation-free.
 
 ## Slice 1 scope
+
+**Status: complete.** Everything in this section is implemented and covered by
+tests. See Verification below for what that means concretely on this machine, and
+the Roadmap for what was deliberately left out.
 
 ### Reading PATH
 
@@ -101,11 +110,15 @@ one, while `~\.local\bin\python.exe` is a real binary and is not.
 
 ### Output
 
-Human-readable table by default. `--json` emits the same data as a stable,
-documented shape — this is the contract a future GUI consumes, so it is part of
-the spec, not an afterthought.
+Human-readable table by default. `--json` emits a stable, documented shape — the
+contract a GUI consumes, so it is part of the spec, not an afterthought.
 
-Flags for slice 1:
+The two are not identical, deliberately. The table shows the composition, the
+per-entry findings, and the **contested** executable names; `--json` additionally
+carries every name found. A human scanning a terminal and a program building a
+searchable view want different amounts of the same audit.
+
+Flags:
 
 ```
 pathdoc [--json] [--scope machine|user|all] [--shadows-only] [--no-color]
@@ -220,6 +233,58 @@ composable in a script rather than a lie waiting to happen.
 
 A closed pipe is not an error. `pathdoc | head` exits 0.
 
+#### Open question: process-only entries are ranked last, not where they really sit
+
+Composed order puts registry entries first and appends process-only entries after
+them. That was needed to make the pinned indices work — index 0 is `system32`,
+index 7 is `Git\cmd`, index 8 is the first user entry — and it is defensible as
+"the composition Windows would build for a fresh process".
+
+It is also **wrong about which copy wins** whenever a name exists in both a
+process-only directory and a registry one, because runtime injection usually goes
+at the *front* of the live `PATH`, not the back.
+
+There is now a live example, courtesy of the 2026-09-16 change described under
+Verification. `node`, `npm`, `npx` and `corepack` exist in both
+`%APPDATA%\fnm\aliases\default` (a registry entry, index 22) and
+`...\fnm_multishells\<pid>_<ts>` (process-only, index 23). pathdoc reports the
+registry copy as the winner. In an `fnm`-activated shell the shim wins, because it
+sits at live position 0:
+
+```powershell
+Get-Command node -All | Where-Object CommandType -eq Application
+# ...\fnm_multishells\20244_1789497930171\node.exe
+```
+
+So pathdoc's answer is right for a fresh non-`fnm` process and wrong for the shell
+you are probably typing in. Before the change it never mattered, because `node`
+appeared exactly once.
+
+The fix is to record each entry's position in the live process `PATH` — `None` when
+it is absent from it — and rank resolution by that where it exists, falling back to
+the composed index. The composed index stays as it is, so the pinned indices and
+the JSON contract survive. **Not done**, because it changes what
+`occurrences[0]` means and that deserves a deliberate decision rather than a quiet
+patch.
+
+#### Open question: shadowing makes exit 1 the normal case
+
+As specified, a contested executable name is a finding, so it produces exit 1.
+That is what this table and the original `has_findings` both said, and it is what
+is implemented.
+
+In practice it makes the exit code close to useless as a health signal. `system32`
+alone ships eight names under two extensions apiece — `eventvwr`, `perfmon`,
+`services`, `hdwwiz`, `powercfg`, `manage-bde`, `SyncAppvPublishingServer`,
+`winrm` — so a machine with nothing but `system32` on its `PATH` still exits 1.
+On this machine dozens of names are contested and not one of them is a defect.
+
+The alternative is to let only per-entry findings drive the exit code and treat
+shadowing as informational, which would make exit 1 mean "something is actually
+wrong with your PATH". **Undecided.** Changing it is a one-line change in
+`reported_findings` plus this table, and it is a behavioural break for anything
+scripting against the current codes, so it should be decided rather than drift.
+
 ## Verification
 
 The acceptance test is unusually concrete, because the expected answers were
@@ -239,14 +304,40 @@ pins the composition itself — 8 machine entries, 14 user, 22 composed,
 `C:\Program Files\Git\cmd` at index 7, the first user entry at index 8 — and the
 `PATHEXT`, versioned-shim and reparse-point behaviour described above.
 
-What the audit finds here, for reference: 1031 distinct executable names across
-23 directories, 38 of them resolving from more than one place. Eight of those 38
-are single-directory `PATHEXT` contests. Nothing on this `PATH` refuses to
-enumerate, so `Unreadable` has no live example and is covered by a test that
-denies itself read on a temporary directory instead.
+`this_machine.rs` is the **single source of truth** for the expected numbers.
+Earlier drafts of this file, the README and the machine's toolchain steering all
+repeated them in prose, which meant four places to update and three of them
+silently wrong the moment the machine changed. They now point here instead.
 
-Cross-check shadowing against PowerShell's own resolver, which is the
-independent reference:
+Nothing on this `PATH` refuses to enumerate, so `Unreadable` has no live example
+and is covered by a test that denies itself read on a temporary directory instead.
+
+### The baseline moves, and that is the test's job to notice
+
+On **2026-09-16 at 17:48** something appended
+`%APPDATA%\fnm\aliases\default` to `HKCU\Environment\Path` and rewrote the value
+as `REG_SZ` where it had been `REG_EXPAND_SZ`. The user scope went from 14 entries
+to 15. Nobody asked for it and the change has not been attributed; the directory
+is a symlink `fnm` created during provisioning the day before, so `fnm` is the only
+plausible owner, but the write itself is unexplained.
+
+Two tests failed immediately, which is exactly what they are for. Treat a failure
+in this file as "the machine changed, go and find out why" — never as a number to
+adjust until the cause is understood. The `REG_SZ` part matters more than the extra
+entry: nothing in the user `PATH` uses `%VAR%` today, so it is harmless now, but a
+`REG_SZ` value will not expand one if somebody adds it later.
+
+### Independent cross-checks
+
+Composition order is cross-checked **automatically**. `this_machine.rs` shells out
+to PowerShell and compares both registry scopes against
+`[Environment]::GetEnvironmentVariable('Path', 'Machine'|'User')`, which reads the
+same two values by a completely different route. Expected values are not
+hard-coded for that test; they are queried at run time.
+
+Shadowing is **not** cross-checked automatically — the assertions there are
+against values established by hand. PowerShell remains the reference for a spot
+check:
 
 ```powershell
 Get-Command git -All | Select-Object -ExpandProperty Source
@@ -254,25 +345,45 @@ Get-Command git -All | Select-Object -ExpandProperty Source
 
 Note that `Get-Command` also returns aliases and functions, which are shell
 constructs rather than PATH entries — `diff` and `fc` are PowerShell aliases on
-this machine, not programs. Slice 1 audits PATH only; alias masking is noted
-in the roadmap below because it is a genuinely different mechanism.
+this machine, not programs. This tool audits PATH only; alias masking is in the
+roadmap below because it is a genuinely different mechanism.
+
+Automating that comparison is a reasonable future addition: `Get-Command -All`
+filtered to `CommandType -eq 'Application'` should agree with a name's
+`occurrences`, in order. It was left out because reconciling PowerShell's own
+`PATHEXT` handling and alias entries is a fair amount of test machinery for a
+check that hand verification already passed.
 
 ## Roadmap
 
-Deliberately out of slice 1:
+Deliberately out of slice 1, in no particular order:
 
 1. **Shell-level masking.** Report when a PATH executable is unreachable because
    the shell resolves the name to an alias or function first. `diff` and `fc` are
    live examples. Needs per-shell introspection, so it is its own slice.
 2. **App Execution Aliases.** Decode `WindowsApps` reparse points to the owning
-   package, so a Store stub is named rather than merely flagged.
+   package, so a Store stub is named rather than merely flagged. Slice 1 reports
+   *that* a file is a reparse point but never *what* it points at, by design —
+   `WinGet\Links\uv.exe` is a live example.
 3. **Env var backup & diff.** PATH is one variable; the registry layer built here
-   generalises. Intended as the next tool in the workspace, sharing `pathdoc-core`'s
-   registry module.
+   generalises. Intended as the next tool in the workspace, sharing
+   `pathdoc-core`'s registry module — which is currently `mod registry`, private,
+   so this needs the module made public or lifted into a crate of its own. Worth
+   deciding which before a second tool depends on it.
 4. **Fix mode.** Only after backup, dry-run and confirmation are designed properly.
+5. **Automated shadowing cross-check** against `Get-Command -All`, as described
+   above.
+6. **Settle the exit-code question** in the Open question section above.
 
 ## Design constraint carried across the whole toolkit
 
 `pathdoc-core` returns data structures and never prints. All formatting, colour
 and ordering for display belongs to `pathdoc-cli`. This is what makes a shared GUI
 possible later without shelling out and scraping text.
+
+**Serialisation is not formatting**, and the `serde` derives in `pathdoc-core` are
+not a breach of that rule. A wire schema is a data representation, and defining it
+once on the real types is what stops a linked GUI and a JSON consumer from
+drifting apart. What would breach the rule is a column width, a colour code, or a
+human-readable label appearing in the core. `Display` implementations for report
+types belong in the front end, not on the types.

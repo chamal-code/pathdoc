@@ -37,10 +37,19 @@ Slice 1 complete. All three questions above are answered:
   distinguishable from a real binary
 - table output with colour, and `--json` against a versioned contract
 
-On the machine it was written for that is 1031 executable names across 23
-directories, 38 of them resolving from more than one place. Every finding that
-took an afternoon to dig out by hand during provisioning is now in the output,
-and each one is pinned by a test.
+On the machine it was written for that is around a thousand executable names across
+23 directories, a few dozen of them resolving from more than one place. Every
+finding that took an afternoon to dig out by hand during provisioning is now in the
+output, and each one is pinned by a test.
+
+Exact expected numbers live in `crates/pathdoc-core/tests/this_machine.rs` and
+nowhere else, deliberately — they moved once already while this README was being
+written.
+
+Two open questions are recorded in [`docs/SPEC.md`](docs/SPEC.md) and worth knowing
+before relying on the output: process-only entries are ranked after the registry
+block, which gives the wrong winner for a name that appears in both; and contested
+names count toward exit code `1`, which makes `1` the normal case.
 
 Next up is the roadmap in [`docs/SPEC.md`](docs/SPEC.md) — shell-level alias
 masking, decoding `WindowsApps` stubs to their owning package, and an env-var
@@ -53,10 +62,19 @@ Full behaviour, the JSON contract and verification criteria are also in
 ## Layout
 
 ```
-Cargo.toml                      workspace root
-crates/pathdoc-core/            library: reads and analyses, returns data, never prints
-crates/pathdoc-cli/             binary `pathdoc`: all formatting lives here
-docs/SPEC.md                    specification
+Cargo.toml                          workspace root
+crates/pathdoc-core/                library: reads and analyses, returns data, never prints
+  src/registry.rs                     the only code touching the registry, read-only
+  src/compose.rs                      pure: splitting, expansion, ordering, findings
+  src/probe.rs                        the only code touching the disk for entries
+  src/executables.rs                  enumeration, PATHEXT, shadow resolution
+  tests/this_machine.rs               acceptance test, machine-specific by design
+crates/pathdoc-cli/                 binary `pathdoc`: all formatting lives here
+  src/options.rs                      clap surface
+  src/table.rs                        the human rendering
+  src/json.rs                         the versioned contract, with its assertions
+docs/SPEC.md                        specification, JSON contract, roadmap
+.kiro/steering/00-project.md        rules and gotchas for anyone working on this
 ```
 
 The split is not ceremony. Keeping the core presentation-free is what allows a
@@ -85,6 +103,40 @@ count matters: cargo prepends its own directories to the child's `PATH`, so
 Exit codes are `0` clean, `1` findings reported, `2` fatal. The code describes
 what was reported, so it respects `--scope`.
 
+Be aware that `1` is the normal case, not the exceptional one. A contested
+executable name counts as a finding, and `system32` alone ships eight names under
+two extensions apiece, so almost any Windows machine reports something. Whether
+that is the right call is an open question recorded in
+[`docs/SPEC.md`](docs/SPEC.md); do not build a script around exit `0` meaning
+"healthy" until it is settled.
+
+What the output looks like:
+
+```
+PATH composition  (8 machine, 14 user, 1 injected at runtime)
+
+  IDX  SCOPE         VALUE TYPE     DIRECTORY
+    0  machine       REG_EXPAND_SZ  C:\WINDOWS\system32
+                                    stored as %SystemRoot%\system32
+    7  machine       REG_EXPAND_SZ  C:\Program Files\Git\cmd
+   13  user          REG_EXPAND_SZ  C:\Users\...\AppData\Local\Programs\Ollama
+   22  process-only  -              C:\Users\...\fnm_multishells\20244_1789497930171
+
+Findings  (1)
+
+   13  missing  C:\Users\...\AppData\Local\Programs\Ollama
+
+Shadowed executables  (38 of 1031 names)
+
+  git
+    wins    #7   C:\Program Files\Git\cmd\git.exe
+    hidden  #15  C:\Users\...\hermes\git\cmd\git.exe
+    hidden  #16  C:\Users\...\hermes\git\bin\git.exe
+  winrm  one directory, decided by PATHEXT order
+    wins    #0   C:\WINDOWS\system32\winrm.cmd
+    hidden  #0   C:\WINDOWS\system32\winrm.vbs
+```
+
 ## Dependencies
 
 All pinned exactly. Every one of them is here for a stated reason:
@@ -101,7 +153,24 @@ unsafe is a dependency rather than something written here.
 
 ## Conventions
 
-Line endings are normalised by `.gitattributes`, with test fixtures marked
-`binary` so that planned CRLF, lone-CR and NUL-byte cases survive round trips
-through git untouched. The machine's global `core.autocrlf=input` cannot affect
-them either way.
+Line endings are normalised by `.gitattributes`. The machine's global
+`core.autocrlf=input` cannot affect this repository either way.
+
+Fixture directories are marked `binary` in the same file so that a fixture
+containing CRLF, a lone CR, or NUL bytes would survive git untouched. No fixture
+directory exists yet — slice 1 did not need one, since the tests either supply
+inputs inline or create real files in a temp directory they clean up. The rule
+stays because a normalised fixture is a silently meaningless test.
+
+## Testing
+
+102 tests, in three groups:
+
+- **Unit tests**, portable. Every input is explicit, including the environment
+  lookup, so no machine's layout leaks into the logic.
+- **`tests/this_machine.rs`**, the acceptance test. Deliberately machine-specific
+  and expected to fail elsewhere: it pins the numbers established by hand during
+  provisioning. Composition order is cross-checked at run time against
+  `[Environment]::GetEnvironmentVariable('Path', ...)` rather than hard-coded.
+- **Contract tests** in `json.rs`, pinning every JSON field name and enum tag, so
+  breaking the contract a GUI depends on breaks a test.
