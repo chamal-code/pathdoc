@@ -186,26 +186,57 @@ PowerShell at test time; shadowing does not, and automating it is on the roadmap
   Read on a thread, hold the `Child` here, poll `try_wait()`. This shipped once and
   only nextest's `LEAK` marker on a **passing** test caught it, so treat `LEAK` as a
   failure when reading test output.
-- **No test outside `this_machine.rs` may spawn a process.** A portable test that
-  spawns a shell is a portable test that fails on a slow machine, which is exactly how
-  CI went red. Inject the subprocess instead — `scan_with` takes the `ask` closure for
-  this reason — and use a fake that records its calls, so spawn *counts* become
-  assertable, which a real shell never made them. Keep one real-shell test, in
-  `this_machine.rs`, and have it **skip loudly** rather than fail when nothing answers:
-  `masking_report()` is that helper. Timing is not the exception it looks like; the one
-  test that asserts the kill path passes an explicit 200 ms timeout to `run_command`
-  rather than relying on how long anything takes.
+- **A portable test must not depend on an external process to report facts about the
+  machine's configuration.** Spawning is fine where the process behaviour is itself
+  what is under test and the assertion does not depend on timing.
+
+  The line is *what the process is being asked*, not whether one is started. Three
+  portable tests reached through a real interpreter to learn what that interpreter
+  masks, which is a machine assumption — and the machine also decides whether it
+  answers in time, which is how CI went red. Inject the subprocess for that instead:
+  `scan_with` takes the `ask` closure for exactly this reason, and a fake that records
+  its calls makes spawn *counts* assertable, which a real shell never did. The
+  real-interpreter test lives in `this_machine.rs`, and **skips loudly** rather than
+  fails when nothing answers — `masking_report()` is that helper.
+
+  Two portable tests do spawn and are correct to: `cmd.exe` in the kill and grandchild
+  tests in `masking.rs`, and `icacls` in the unreadable-directory test in
+  `executables.rs`. Both satisfy the rule as stated. The process behaviour *is* the
+  subject, both binaries are on every Windows host, and the assertions are
+  deterministic — a marker file that exists or does not, an ACL that applied or did
+  not, checked by actually attempting the `read_dir`. Neither asks the machine a
+  question it could answer differently. Do not "tidy" either of them away; the first
+  is the only proof that the abandoned-child bug is fixed.
+
+  Timing counts as configuration. The kill test passes an explicit 200 ms timeout to
+  `run_command` rather than depending on how long any real work takes.
+- **Prefer a false pass to a flake.** Where a test cannot be made fully deterministic,
+  arrange the residual risk so that an overloaded machine makes the test prove *less*
+  rather than fail. The kill test waits five seconds for a marker the child would have
+  written at two: a runner slow enough to break that margin reports a pass that proved
+  nothing, not a red build. Document the limit in the test, as that one does. A false
+  pass costs one signal; a flake costs the credibility of every other signal in the
+  suite, and a suite nobody trusts is a suite nobody reads.
 - **Deduplicate before spawning, not after.** Deduplicating requested interpreters
   against the ones that had already *answered* let a repeated name spawn twice
   whenever the first attempt failed. CI showed it as a 20-second test among 10-second
   ones. Keying on the resolved path before any work starts is cheaper and correct
   regardless of failures.
-- **Make the work cheaper before raising a limit.** `Get-Command -CommandType
-  Alias,Function` walks every module path for autoload discovery: 1391 constructs here
-  against 197 for `Get-Alias` plus the `Function:` drive, 218 ms against 149 ms, and
-  **identical** results — the same 24 masked names, no difference either direction.
-  Raising a timeout is a hedge because any fixed value can be exceeded; removing the
-  work is the fix. Do both, and say in the comment which is which.
+- **Make the work cheaper before raising a limit, and prefer removing costs that scale
+  with the host.** `Get-Command -CommandType Alias,Function` walks every module path
+  for autoload discovery: 1391 constructs here against 197 for `Get-Alias` plus the
+  `Function:` drive, 218 ms against 149 ms, and **identical** results — the same 24
+  masked names, no difference either direction. Raising a timeout is a hedge because
+  any fixed value can be exceeded; removing the work is the fix. Do both, and say in
+  the comment which is which.
+
+  The 69 ms understates it, and that is the transferable part. Autoload discovery
+  scales with the number of **installed modules**, so the measurement is a property of
+  this machine's inventory rather than of the operation. A GitHub Windows runner
+  carries far more, which is almost certainly where the original ten seconds went. When
+  choosing between two ways to ask the same question, prefer the one whose cost does
+  not grow with the host — a local benchmark cannot see that difference, and a
+  benchmark that shows a small gap for a cost that scales is actively misleading.
 - **`winget`'s installers append a trailing `;`.** That is where the `Empty` finding
   on this machine keeps coming from. It does not accumulate — always exactly one or
   none — and edits that rebuild the value from a filtered split remove it again.

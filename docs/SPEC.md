@@ -586,14 +586,21 @@ The script is `Get-Alias` plus the `Function:` drive. Deliberately **not**
 commands that autoloading *could* provide: on this machine 1391 constructs against 197,
 218 ms against 149 ms, and — the part that decided it — **exactly the same 24 masked
 names, with no difference in either direction.** The expensive enumeration bought
-nothing, and it is the kind of work that balloons on a machine with a different module
-inventory.
+nothing.
 
 That distinction was not academic. A GitHub Actions runner exceeded the original
 ten-second timeout on every masking test, one of them twice. The timeout is now 30
 seconds, but raising it is a **hedge, not a fix** — any fixed value can be exceeded on
 a loaded machine — so the script was made cheap at the same time, and that is the
 actual remedy.
+
+The 69 ms measured here is the least interesting number in that paragraph. Autoload
+discovery scales with the number of **installed modules**, so the local gap describes
+this machine's module inventory rather than the operation, and a runner carries far
+more. That is almost certainly where the original ten seconds went. The change removed
+a cost that grows with the host, which is a different kind of win from a faster
+constant, and one no local benchmark can show. Prefer that trade whenever two ways of
+asking the same question are otherwise equivalent.
 
 Two things follow about the child process:
 

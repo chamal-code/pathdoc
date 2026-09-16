@@ -67,13 +67,16 @@ const SEPARATOR: char = '\t';
 /// newlines, so it is deliberately not asked for — the name is the mask.
 ///
 /// `Get-Alias` and the `Function:` drive, deliberately, and **not**
-/// `Get-Command -CommandType Alias,Function`. `Get-Command` walks every module path
-/// to enumerate commands that autoloading *could* provide, which on this machine is
-/// 1391 constructs against 197, and is the kind of work that balloons on a cold
-/// machine with a different module inventory. Measured here at 218 ms against 149 ms,
-/// and — the part that matters — both find exactly the same 24 masked names, with no
-/// difference in either direction. The expensive enumeration bought nothing and was
-/// the likeliest reason a CI runner blew a 10-second timeout.
+/// `Get-Command -CommandType Alias,Function`. `Get-Command` walks every module path to
+/// enumerate commands that autoloading *could* provide, which on this machine is 1391
+/// constructs against 197. Both find exactly the same 24 masked names, with no
+/// difference in either direction, so the expensive enumeration bought nothing.
+///
+/// The local measurement — 218 ms against 149 ms — is the weakest part of that case.
+/// Autoload discovery scales with the number of **installed modules**, so the gap
+/// describes this machine's inventory rather than the operation; a CI runner carries
+/// far more modules, and that is almost certainly where the original 10-second timeout
+/// went. What this replaced was not 69 ms but a cost that grows with the host.
 const SCRIPT: &str = "\
 $ErrorActionPreference = 'SilentlyContinue'
 $sep = [char]9

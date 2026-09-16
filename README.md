@@ -251,10 +251,11 @@ stays because a normalised fixture is a silently meaningless test.
 174 tests, in three groups:
 
 - **Unit tests**, portable. Every input is explicit, including the environment
-  lookup, so no machine's layout leaks into the logic. **Nothing here spawns a
-  process** — the shell scan is tested against an injected fake, which also makes
-  spawn counts assertable. A portable test that starts a shell is a portable test
-  that fails on a slow CI runner, which is how that rule was learned.
+  lookup, so no machine's layout leaks into the logic. None of them asks an external
+  process what the machine is configured like — the shell scan runs against an
+  injected fake, which also makes spawn counts assertable. A few do spawn `cmd.exe`
+  or `icacls` where the process behaviour is itself the subject and the assertion is
+  a marker file or an ACL rather than a duration.
 - **Contract tests** in `json.rs`, pinning every JSON field name and enum tag, so
   breaking the contract a GUI depends on breaks a test.
 - **`tests/this_machine.rs`**, 24 acceptance tests. Deliberately machine-specific:
@@ -348,6 +349,14 @@ The remedy was to make the script cheap rather than to raise the limit — `Get-
 plus the `Function:` drive instead of `Get-Command -CommandType Alias,Function`, which
 walks every module path for autoload discovery. 197 constructs against 1391, and
 identical results. The timeout went up as well, to 30 seconds, but that is a hedge.
+
+The local benchmark said 149 ms against 218 ms, and it understated the fix. Autoload
+discovery scales with the number of installed modules, so that 69 ms is a fact about
+one machine's module inventory rather than about the operation — and a runner carries
+far more modules than this machine does. The point was never trimming 69 ms; it was
+deleting a cost that grows with the host, which no local measurement can show you.
+The run after the fix: zero `LEAK` markers, 150 passed and 24 skipped in 5.6 s, and
+no test over ten seconds.
 
 ## Licence
 
