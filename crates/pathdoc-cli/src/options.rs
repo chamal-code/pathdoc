@@ -4,6 +4,11 @@ use clap::{Parser, ValueEnum};
 use pathdoc_core::{PathEntry, PathScope};
 
 /// Read-only auditor for the Windows `PATH`.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "these are command-line flags; grouping them into a sub-struct would fight clap \
+              and buy nothing"
+)]
 #[derive(Debug, Parser)]
 #[command(
     name = "pathdoc",
@@ -16,8 +21,12 @@ use pathdoc_core::{PathEntry, PathScope};
                   neither registry scope are reported as process-only, which is legitimate \
                   rather than a problem.\n\n\
                   It never writes. No PATH edits, no registry writes, no fix mode.\n\n\
-                  Exit codes: 0 nothing to report, 1 findings present, 2 fatal error. The exit \
-                  code describes what was reported, so it respects --scope."
+                  Exit codes: 0 nothing to report, 1 actionable findings present, 2 fatal error. \
+                  Only per-entry findings count - a dead directory, a duplicate, a stray \
+                  separator - because those are things a person can go and fix. Shadowing is \
+                  always reported but does not fail unless you ask for it with \
+                  --fail-on-shadow. The exit code describes what was reported, so it respects \
+                  --scope."
 )]
 pub struct Options {
     /// Emit the report as JSON instead of a table.
@@ -33,6 +42,15 @@ pub struct Options {
     /// Report only shadowed executables, omitting the composition table.
     #[arg(long)]
     pub shadows_only: bool,
+
+    /// Treat a shadowed executable name as a failure for the exit code.
+    ///
+    /// Off by default because shadowing is usually correct and intentional:
+    /// `system32` alone ships several names under two extensions apiece, so a
+    /// signal that counted it would be on for every machine, and a signal that is
+    /// always on is not a signal.
+    #[arg(long)]
+    pub fail_on_shadow: bool,
 
     /// Never emit colour, whatever the destination supports.
     #[arg(long)]
@@ -78,6 +96,7 @@ mod tests {
             raw: r"C:\somewhere".to_owned(),
             expanded: None,
             value_kind: None,
+            process_position: Some(0),
             findings: Vec::new(),
         }
     }
@@ -95,6 +114,8 @@ mod tests {
         assert!(!options.json);
         assert!(!options.shadows_only);
         assert!(!options.no_color);
+        // Shadowing must be opt-in as a failure, or exit 1 stops meaning anything.
+        assert!(!options.fail_on_shadow);
         assert_eq!(options.scope, ScopeFilter::All);
     }
 
@@ -105,10 +126,12 @@ mod tests {
             "--scope",
             "machine",
             "--shadows-only",
+            "--fail-on-shadow",
             "--no-color",
         ]);
         assert!(options.json);
         assert!(options.shadows_only);
+        assert!(options.fail_on_shadow);
         assert!(options.no_color);
         assert_eq!(options.scope, ScopeFilter::Machine);
     }

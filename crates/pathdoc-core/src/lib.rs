@@ -29,7 +29,16 @@ mod registry;
 /// `gzip`, `unzip`, `sdiff` — appear exactly once, so a conflicts-only list could
 /// never have named them. "Where does this come from" turned out to be as much of
 /// a question as "which one wins".
-pub const SCHEMA_VERSION: u32 = 2;
+///
+/// `3` added [`PathEntry::process_position`], plus [`Occurrence::scope`] and
+/// [`Occurrence::process_position`], and changed the ordering of
+/// [`Resolved::occurrences`] from composed order to live resolution order. Reason:
+/// runtime injection goes to the *front* of the live `PATH`, so ranking by composed
+/// index named the wrong winner for any name present both in a process-only
+/// directory and a registry one. There is no single right answer — a running shell
+/// and a freshly started process resolve differently — so both are now reported
+/// rather than one being guessed at.
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// Where a `PATH` entry came from.
 ///
@@ -134,6 +143,18 @@ pub struct PathEntry {
     pub expanded: Option<String>,
     /// Registry value type, where the entry came from the registry.
     pub value_kind: Option<ValueKind>,
+    /// Where this directory sits in the **live process** `PATH`, if at all.
+    ///
+    /// `None` means the running process cannot resolve anything from here — either
+    /// because the entry was added to the registry after the process started, or
+    /// because something removed it from the process block. Neither is an error,
+    /// and both are worth seeing: a registry entry with no position is one a shell
+    /// restart would pick up.
+    ///
+    /// This is the number that decides which copy of a program actually runs
+    /// *now*. [`PathEntry::index`] decides which copy a freshly started process
+    /// would run. They disagree because runtime injection goes to the front.
+    pub process_position: Option<usize>,
     /// Everything noteworthy about this entry. Empty means healthy.
     pub findings: Vec<Finding>,
 }
@@ -149,6 +170,12 @@ impl PathEntry {
     pub fn effective(&self) -> &str {
         self.expanded.as_deref().unwrap_or(&self.raw)
     }
+
+    /// Whether the running process can resolve programs from this directory.
+    #[must_use]
+    pub fn is_live(&self) -> bool {
+        self.process_position.is_some()
+    }
 }
 
 /// One executable file found inside a `PATH` entry.
@@ -158,11 +185,17 @@ impl PathEntry {
 pub struct Occurrence {
     /// Index of the [`PathEntry`] that contains it, in the full composed order.
     pub entry_index: usize,
+    /// Which scope contributed the containing entry.
+    pub scope: PathScope,
+    /// The containing entry's [`PathEntry::process_position`].
+    pub process_position: Option<usize>,
     /// The directory it was found in — the containing entry's effective value.
     ///
-    /// Denormalised on purpose. A front end may report a filtered subset of
-    /// entries, and an occurrence that can only be understood by joining against
-    /// an array that might not be there is not much of a fact.
+    /// Denormalised on purpose, along with `scope` and `process_position`. A front
+    /// end may report a filtered subset of entries, or none at all under
+    /// `--shadows-only`, and an occurrence that can only be understood by joining
+    /// against an array that might not be there is not much of a fact. Carrying all
+    /// three is also what lets a consumer work out both winners for itself.
     pub directory: String,
     /// File name including extension, as it appears on disk.
     pub file_name: String,
@@ -184,17 +217,55 @@ pub struct Occurrence {
 pub struct Resolved {
     /// Lower-cased file stem, since Windows resolution is case-insensitive.
     pub stem: String,
-    /// Every place the stem was found, in the order Windows tries them: composed
-    /// `PATH` order first, then `PATHEXT` order within a single directory. The
-    /// first element is the one that wins.
+    /// Every place the stem was found, in **live resolution order**: entries the
+    /// running process can see first, in their process order, then entries it
+    /// cannot, in composed order. Within one directory, `PATHEXT` order.
+    ///
+    /// So `occurrences[0]` is what this process runs — see [`Resolved::live_winner`]
+    /// for the version that says so honestly when nothing here is live at all.
     pub occurrences: Vec<Occurrence>,
 }
 
 impl Resolved {
-    /// The occurrence Windows would actually run.
+    /// What the **running process** would execute for this name.
+    ///
+    /// `None` when no occurrence is on the live `PATH`, which happens when every
+    /// copy sits in a directory added to the registry since the process started.
+    /// A consumer reading JSON can compute this as the first occurrence whose
+    /// `processPosition` is not null.
     #[must_use]
-    pub fn winner(&self) -> Option<&Occurrence> {
-        self.occurrences.first()
+    pub fn live_winner(&self) -> Option<&Occurrence> {
+        self.occurrences
+            .iter()
+            .find(|occurrence| occurrence.process_position.is_some())
+    }
+
+    /// What a **newly started process** would execute for this name.
+    ///
+    /// Process-only directories do not exist in a fresh process, so they are
+    /// excluded; of the rest, the lowest composed index wins. `None` when every
+    /// occurrence is process-only. A consumer reading JSON can compute this as the
+    /// occurrence with the lowest `entryIndex` among those whose `scope` is not
+    /// `processOnly`.
+    #[must_use]
+    pub fn fresh_winner(&self) -> Option<&Occurrence> {
+        self.occurrences
+            .iter()
+            .filter(|occurrence| occurrence.scope != PathScope::ProcessOnly)
+            .min_by_key(|occurrence| occurrence.entry_index)
+    }
+
+    /// Whether the running process and a fresh one would run different files.
+    ///
+    /// True only when both answers exist and name different directories. This is
+    /// the case that used to be reported wrongly, and the case where a verdict is
+    /// meaningless without saying which process it describes.
+    #[must_use]
+    pub fn winner_depends_on_context(&self) -> bool {
+        match (self.live_winner(), self.fresh_winner()) {
+            (Some(live), Some(fresh)) => live.entry_index != fresh.entry_index,
+            _ => false,
+        }
     }
 
     /// Whether more than one file answers to this name.
@@ -374,12 +445,32 @@ mod tests {
             raw: r"%SystemRoot%".to_owned(),
             expanded: None,
             value_kind: None,
+            process_position: Some(0),
             findings: Vec::new(),
         };
         assert_eq!(entry.effective(), r"%SystemRoot%");
 
         entry.expanded = Some(r"C:\WINDOWS".to_owned());
         assert_eq!(entry.effective(), r"C:\WINDOWS");
+    }
+
+    #[test]
+    fn an_entry_absent_from_the_process_block_is_not_live() {
+        let mut entry = PathEntry {
+            index: 0,
+            scope: PathScope::Machine,
+            raw: r"C:\just\installed".to_owned(),
+            expanded: None,
+            value_kind: None,
+            process_position: None,
+            findings: Vec::new(),
+        };
+        // Added to the registry since this process started. Not an error, and not
+        // resolvable until something restarts.
+        assert!(!entry.is_live());
+
+        entry.process_position = Some(4);
+        assert!(entry.is_live());
     }
 
     #[test]
@@ -428,11 +519,36 @@ mod tests {
     }
 
     #[test]
+    fn every_entry_reports_whether_this_process_can_see_it() {
+        match audit() {
+            Ok(report) => {
+                // Portable: `system32` is on both the registry and the process
+                // block of any Windows process, so at least one entry is live.
+                assert!(report.entries.iter().any(PathEntry::is_live));
+
+                // A process-only entry is by definition one the process can see.
+                for entry in &report.entries {
+                    if entry.scope == PathScope::ProcessOnly {
+                        assert!(
+                            entry.is_live(),
+                            "{:?} is process-only yet has no process position",
+                            entry.effective()
+                        );
+                    }
+                }
+            }
+            Err(err) => panic!("audit failed: {err}"),
+        }
+    }
+
+    #[test]
     fn a_single_occurrence_is_not_shadowed() {
         let resolved = Resolved {
             stem: "gzip".to_owned(),
             occurrences: vec![Occurrence {
                 entry_index: 17,
+                scope: PathScope::User,
+                process_position: Some(17),
                 directory: r"C:\vendored\usr\bin".to_owned(),
                 file_name: "gzip.exe".to_owned(),
                 is_reparse_point: false,
@@ -441,8 +557,17 @@ mod tests {
 
         assert!(!resolved.is_shadowed());
         assert!(!resolved.is_pathext_only());
+        assert!(!resolved.winner_depends_on_context());
         assert_eq!(
-            resolved.winner().map(|occurrence| occurrence.entry_index),
+            resolved
+                .live_winner()
+                .map(|occurrence| occurrence.entry_index),
+            Some(17)
+        );
+        assert_eq!(
+            resolved
+                .fresh_winner()
+                .map(|occurrence| occurrence.entry_index),
             Some(17)
         );
     }
@@ -451,6 +576,8 @@ mod tests {
     fn a_contest_inside_one_directory_is_decided_by_pathext() {
         let occurrence = |file_name: &str| Occurrence {
             entry_index: 0,
+            scope: PathScope::Machine,
+            process_position: Some(1),
             directory: r"C:\WINDOWS\system32".to_owned(),
             file_name: file_name.to_owned(),
             is_reparse_point: false,
@@ -462,5 +589,46 @@ mod tests {
 
         assert!(resolved.is_shadowed());
         assert!(resolved.is_pathext_only());
+        assert!(!resolved.winner_depends_on_context());
+    }
+
+    #[test]
+    fn the_two_winners_are_derivable_the_way_a_json_consumer_would() {
+        // Documented derivation rules, asserted so they stay true: live winner is
+        // the first occurrence with a process position, fresh winner is the lowest
+        // entry index among those that are not process-only.
+        let shim = Occurrence {
+            entry_index: 9,
+            scope: PathScope::ProcessOnly,
+            process_position: Some(0),
+            directory: r"C:\shim".to_owned(),
+            file_name: "node.exe".to_owned(),
+            is_reparse_point: false,
+        };
+        let registry = Occurrence {
+            entry_index: 3,
+            scope: PathScope::User,
+            process_position: Some(5),
+            directory: r"C:\registry".to_owned(),
+            file_name: "node.exe".to_owned(),
+            is_reparse_point: false,
+        };
+        // Live order: the shim is at process position 0, so it comes first.
+        let resolved = Resolved {
+            stem: "node".to_owned(),
+            occurrences: vec![shim, registry],
+        };
+
+        assert_eq!(
+            resolved.live_winner().map(|found| found.directory.as_str()),
+            Some(r"C:\shim")
+        );
+        assert_eq!(
+            resolved
+                .fresh_winner()
+                .map(|found| found.directory.as_str()),
+            Some(r"C:\registry")
+        );
+        assert!(resolved.winner_depends_on_context());
     }
 }

@@ -16,7 +16,7 @@ use std::fs;
 use std::io;
 use std::os::windows::fs::MetadataExt;
 
-use crate::{Finding, Occurrence, PathEntry, Resolved};
+use crate::{Finding, Occurrence, PathEntry, PathScope, Resolved};
 
 /// `PATHEXT` as Windows documents it, used only when the environment is silent.
 const DEFAULT_PATHEXT: &str = ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC";
@@ -28,6 +28,10 @@ const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
 struct Found {
     /// Index of the entry whose directory it was found in.
     entry_index: usize,
+    /// Scope of that entry.
+    scope: PathScope,
+    /// That entry's position in the live process `PATH`, if any.
+    process_position: Option<usize>,
     /// The directory itself.
     directory: String,
     /// File name as it appears on disk, original casing.
@@ -70,8 +74,13 @@ pub(crate) fn enumerate(entries: &mut [PathEntry], extensions: &[String]) -> Vec
         }
 
         let directory = entry.effective().to_owned();
+        let origin = Origin {
+            entry_index: entry.index,
+            scope: entry.scope,
+            process_position: entry.process_position,
+        };
         match fs::read_dir(&directory) {
-            Ok(reader) => collect(reader, entry.index, &directory, extensions, &mut found),
+            Ok(reader) => collect(reader, origin, &directory, extensions, &mut found),
             Err(err) => entry.findings.push(finding_for_read_error(err.kind())),
         }
     }
@@ -104,10 +113,18 @@ fn finding_for_read_error(kind: io::ErrorKind) -> Finding {
     }
 }
 
+/// The bits of a [`PathEntry`] every file inside it inherits.
+#[derive(Debug, Clone, Copy)]
+struct Origin {
+    entry_index: usize,
+    scope: PathScope,
+    process_position: Option<usize>,
+}
+
 /// Pull the executables out of one already-opened directory.
 fn collect(
     reader: fs::ReadDir,
-    entry_index: usize,
+    origin: Origin,
     directory: &str,
     extensions: &[String],
     found: &mut Vec<Found>,
@@ -132,7 +149,9 @@ fn collect(
         }
 
         found.push(Found {
-            entry_index,
+            entry_index: origin.entry_index,
+            scope: origin.scope,
+            process_position: origin.process_position,
             directory: directory.to_owned(),
             file_name,
             stem,
@@ -142,15 +161,19 @@ fn collect(
     }
 }
 
-/// Sort into resolution order, then group by name.
+/// Sort into live resolution order, then group by name.
 fn group(mut found: Vec<Found>) -> Vec<Resolved> {
-    // Resolution order exactly: `PATH` order, then `PATHEXT` order within a
-    // directory. File name last only to keep the result stable, since `read_dir`
-    // makes no promises about the order it hands things back.
     found.sort_by(|left, right| {
-        left.entry_index
-            .cmp(&right.entry_index)
+        // Live position first, because that is what the running process resolves
+        // by. Directories the process cannot see sort after every one it can —
+        // they win nothing here, whatever their composed index says.
+        live_rank(left)
+            .cmp(&live_rank(right))
+            .then(left.entry_index.cmp(&right.entry_index))
+            // `PATHEXT` order within a single directory.
             .then(left.extension_rank.cmp(&right.extension_rank))
+            // Only to keep the result stable: `read_dir` makes no promises about
+            // the order it hands things back.
             .then_with(|| left.file_name.cmp(&right.file_name))
     });
 
@@ -158,6 +181,8 @@ fn group(mut found: Vec<Found>) -> Vec<Resolved> {
     for item in found {
         groups.entry(item.stem).or_default().push(Occurrence {
             entry_index: item.entry_index,
+            scope: item.scope,
+            process_position: item.process_position,
             directory: item.directory,
             file_name: item.file_name,
             is_reparse_point: item.is_reparse_point,
@@ -172,6 +197,11 @@ fn group(mut found: Vec<Found>) -> Vec<Resolved> {
     resolved.sort_by(|left, right| left.stem.cmp(&right.stem));
 
     resolved
+}
+
+/// Sort key for live resolution: a directory the process cannot see ranks last.
+fn live_rank(found: &Found) -> usize {
+    found.process_position.unwrap_or(usize::MAX)
 }
 
 /// Split a `PATHEXT` value into lower-cased extensions, order preserved.
@@ -226,12 +256,14 @@ mod tests {
         DEFAULT_PATHEXT, classify, enumerate, extensions, finding_for_read_error, is_enumerable,
         parse_extensions,
     };
-    use crate::{Finding, PathEntry, PathScope};
+    use crate::{Finding, PathEntry, PathScope, Resolved};
 
     fn windows_pathext() -> Vec<String> {
         parse_extensions(DEFAULT_PATHEXT)
     }
 
+    /// The ordinary case: a registry entry the running process can also see, at the
+    /// same position. That is what a fresh shell looks like.
     fn entry(index: usize, directory: &str, findings: Vec<Finding>) -> PathEntry {
         PathEntry {
             index,
@@ -239,7 +271,26 @@ mod tests {
             raw: directory.to_owned(),
             expanded: None,
             value_kind: None,
+            process_position: Some(index),
             findings,
+        }
+    }
+
+    /// An entry at an arbitrary live position, or none at all.
+    fn entry_at(
+        index: usize,
+        scope: PathScope,
+        directory: &str,
+        process_position: Option<usize>,
+    ) -> PathEntry {
+        PathEntry {
+            index,
+            scope,
+            raw: directory.to_owned(),
+            expanded: None,
+            value_kind: None,
+            process_position,
+            findings: Vec::new(),
         }
     }
 
@@ -459,10 +510,12 @@ mod tests {
 
         let resolved = enumerate(&mut entries, &windows_pathext());
 
-        let Some(occurrence) = resolved.first().and_then(|item| item.winner()) else {
+        let Some(occurrence) = resolved.first().and_then(Resolved::live_winner) else {
             panic!("tool.exe was not found")
         };
         assert_eq!(occurrence.entry_index, 7);
+        assert_eq!(occurrence.scope, PathScope::Machine);
+        assert_eq!(occurrence.process_position, Some(7));
         assert_eq!(occurrence.directory, sandbox.path());
         assert_eq!(occurrence.file_name, "tool.exe");
         assert!(!occurrence.is_reparse_point);
@@ -504,10 +557,103 @@ mod tests {
             "one directory, so PATH order cannot be the tie-breaker"
         );
         assert_eq!(
-            tool.winner()
+            tool.live_winner()
                 .map(|occurrence| occurrence.file_name.as_str()),
             Some("tool.com")
         );
+        // One directory, so no context can disagree about which file wins.
+        assert!(!tool.winner_depends_on_context());
+    }
+
+    #[test]
+    fn live_position_outranks_composed_index() {
+        // The bug this fixes. A shim injected at runtime sits at the front of the
+        // live PATH but is appended to the end of the composed order, so ranking by
+        // composed index named the wrong winner.
+        let shim = Sandbox::new("shim").with(&["node.exe"]);
+        let registry = Sandbox::new("registry").with(&["node.exe"]);
+        let mut entries = vec![
+            // Composed first, but the process sees it second.
+            entry_at(0, PathScope::User, &registry.path(), Some(1)),
+            // Composed last, and injected at the front of the live PATH.
+            entry_at(1, PathScope::ProcessOnly, &shim.path(), Some(0)),
+        ];
+
+        let resolved = enumerate(&mut entries, &windows_pathext());
+        let node = &resolved[0];
+
+        // What actually runs now.
+        assert_eq!(
+            node.live_winner().map(|found| found.directory.as_str()),
+            Some(shim.path().as_str())
+        );
+        // What would run in a new process, where the shim does not exist.
+        assert_eq!(
+            node.fresh_winner().map(|found| found.directory.as_str()),
+            Some(registry.path().as_str())
+        );
+        assert!(
+            node.winner_depends_on_context(),
+            "the two answers differ, and saying only one of them is what was wrong before"
+        );
+    }
+
+    #[test]
+    fn a_directory_the_process_cannot_see_wins_nothing_now() {
+        // A registry entry added after the shell started. It will win once the
+        // shell restarts, and not before.
+        let unseen = Sandbox::new("unseen").with(&["tool.exe"]);
+        let visible = Sandbox::new("visible").with(&["tool.exe"]);
+        let mut entries = vec![
+            entry_at(0, PathScope::Machine, &unseen.path(), None),
+            entry_at(1, PathScope::User, &visible.path(), Some(3)),
+        ];
+
+        let resolved = enumerate(&mut entries, &windows_pathext());
+        let tool = &resolved[0];
+
+        assert_eq!(
+            tool.live_winner().map(|found| found.directory.as_str()),
+            Some(visible.path().as_str())
+        );
+        // But composed order still says the new entry outranks it.
+        assert_eq!(
+            tool.fresh_winner().map(|found| found.directory.as_str()),
+            Some(unseen.path().as_str())
+        );
+        // Occurrences are in live order, so the one that cannot be reached is last.
+        assert_eq!(tool.occurrences[0].directory, visible.path());
+        assert_eq!(tool.occurrences[1].directory, unseen.path());
+        assert_eq!(tool.occurrences[1].process_position, None);
+    }
+
+    #[test]
+    fn a_name_only_in_an_unseen_directory_has_no_live_winner() {
+        let unseen = Sandbox::new("only-unseen").with(&["just.exe"]);
+        let mut entries = vec![entry_at(0, PathScope::User, &unseen.path(), None)];
+
+        let resolved = enumerate(&mut entries, &windows_pathext());
+        let just = &resolved[0];
+
+        // Honest: nothing on this process's PATH answers to `just` yet.
+        assert!(just.live_winner().is_none());
+        assert!(just.fresh_winner().is_some());
+        // Not a disagreement, just an absence.
+        assert!(!just.winner_depends_on_context());
+    }
+
+    #[test]
+    fn a_name_only_in_a_process_only_directory_has_no_fresh_winner() {
+        let shim = Sandbox::new("only-shim").with(&["node.exe"]);
+        let mut entries = vec![entry_at(0, PathScope::ProcessOnly, &shim.path(), Some(0))];
+
+        let resolved = enumerate(&mut entries, &windows_pathext());
+        let node = &resolved[0];
+
+        assert!(node.live_winner().is_some());
+        // A fresh process would not have this directory on PATH at all.
+        assert!(node.fresh_winner().is_none());
+        assert!(!node.winner_depends_on_context());
     }
 
     #[test]

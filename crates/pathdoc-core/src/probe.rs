@@ -77,6 +77,7 @@ mod tests {
             raw: raw.to_owned(),
             expanded: None,
             value_kind: None,
+            process_position: Some(index),
             findings: Vec::new(),
         }
     }

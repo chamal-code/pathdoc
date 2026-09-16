@@ -46,26 +46,54 @@ leaks into the logic.
 into prose. They were briefly duplicated across `docs/SPEC.md`, `README.md` and the
 machine's toolchain steering, and went stale in all three within a day.
 
-### When it fails, the machine changed — go and look
+### Two sessions edit this machine — coordinate
 
-Hit for real on **2026-09-16**: something appended
-`%APPDATA%\fnm\aliases\default` to `HKCU\Environment\Path` and rewrote the value as
-`REG_SZ` where it had been `REG_EXPAND_SZ`, taking the user scope from 14 entries to
-15. Two assertions failed within minutes of the change, before anyone noticed
-otherwise.
+Machine-level changes are the **trunk** session's responsibility, and the trunk
+announces them. From this project session:
 
-The rule that falls out of it: **never adjust a number in this file to make it
-pass.** Find out what moved and why first. A baseline that gets edited whenever
-reality disagrees is not a baseline. Useful when investigating:
+- **A red acceptance test means ask the trunk what changed.** Do not re-baseline
+  blind, and do not guess at a cause — a plausible-sounding attribution that turns
+  out to be wrong is worse than saying you do not know.
+- **Never make machine-wide registry writes from here.** Not even to "fix" drift
+  the tests just caught. Report it and let the trunk act.
+- **Never adjust a number to make a test pass.** Find out what moved and why first.
+  A baseline edited whenever reality disagrees is not a baseline.
+
+Hit for real on **2026-09-16**, twice in one afternoon. At 17:48 the trunk appended
+`%APPDATA%\fnm\aliases\default` to the user `PATH` while configuring an MCP server:
+`npx.cmd` could not find `node`, because `fnm` only exposes it inside shells it has
+activated. Two assertions failed within minutes. Later the same day GitHub CLI and
+starship went into the machine scope, zoxide, just and dust into the user scope, and
+the dead `Programs\Ollama` entry was pruned — shifting every user index by two.
+
+Worth noting how the first one was misdiagnosed here: the added directory is a
+symlink `fnm` created during provisioning, so `fnm` looked like the only plausible
+owner. It was not; the write came from a session doing something else entirely. The
+timestamps were consistent with a story that was wrong.
+
+### Check the value kind as carefully as the value
 
 ```powershell
-(Get-Item 'HKCU:\Environment').GetValueKind('Path')
+(Get-Item 'HKCU:\Environment').GetValueKind('Path')   # want ExpandString
 (Get-Item 'HKCU:\Environment').GetValue('Path', $null, 'DoNotExpandEnvironmentNames')
 ```
 
-The value **kind** is worth checking as carefully as the value. A tool rewriting
-`REG_EXPAND_SZ` as `REG_SZ` is silent and harmless right up until somebody adds a
-`%VAR%` to the PATH.
+`[Environment]::SetEnvironmentVariable` writes **`REG_SZ` unconditionally** — it is
+not content-sensitive, whatever the common assumption. Confirmed by experiment:
+
+```powershell
+[Environment]::SetEnvironmentVariable('Probe', 'C:\literal', 'User')  # -> String
+[Environment]::SetEnvironmentVariable('Probe', '%TEMP%\var', 'User')  # -> String
+```
+
+So every `PATH` edit through it silently downgrades `REG_EXPAND_SZ`. There is now an
+assertion that every registry entry reports `REG_EXPAND_SZ`, which is the check that
+catches it.
+
+If a write slice is ever built: read with `DoNotExpandEnvironmentNames`, preserve
+the value kind explicitly, and never round-trip through `SetEnvironmentVariable`.
+Reading without that flag returns expanded paths, and writing those back turns an
+indirection into a literal.
 
 Cross-check against `Get-Command <name> -All`, which is the independent
 reference. Remember it also returns aliases and functions: `diff` and `fc` are
@@ -82,15 +110,16 @@ PowerShell at test time; shadowing does not, and automating it is on the roadmap
   expanded one are different facts.
 - Process-only entries are normal, not errors. `fnm` injects a per-shell shim
   directory on activation.
-- **Process-only entries are appended after the registry block, which makes their
-  shadowing rank wrong for the live shell.** Runtime injection usually goes at the
-  *front* of the process `PATH`, so a name present in both a process-only directory
-  and a registry one is reported with the wrong winner. Live example since
-  2026-09-16: `node` is reported as resolving from `fnm\aliases\default` (a registry
-  entry) when in an `fnm` shell it actually comes from `fnm_multishells`. Recorded
-  as an open question in `docs/SPEC.md`; the fix is to track each entry's live
-  process position. Do not "fix" it by interleaving, which would break the pinned
-  indices.
+- **"Which copy wins" has two answers and they disagree.** Composed order is what a
+  fresh process resolves by; the live process `PATH` is what the running one
+  resolves by, and runtime injection goes to its *front*. Both are reported —
+  `PathEntry::process_position` carries the live one, `None` when the process cannot
+  see the directory at all. Rank resolution by live position, keep the composed
+  index as it is. Do not "fix" this by interleaving process-only entries into the
+  composed order: that would break the pinned indices for nothing.
+- **A registry entry with no live position is not an error.** It is one the process
+  started too early to see, and the only fix is a shell restart, which the table
+  says out loud because nothing else in the report hints at it.
 - Report reparse points rather than following them, so Store alias stubs stay
   identifiable. Live examples of both branches: `WinGet\Links\uv.exe` **is** a
   symlink, `~\.local\bin\python.exe` is not.
@@ -118,6 +147,11 @@ PowerShell at test time; shadowing does not, and automating it is on the roadmap
   decide "were there findings" makes every run exit non-zero. Ask whether anything
   is *contested* instead. There is a test named for this trap in
   `crates/pathdoc-cli/src/main.rs`.
+- **Shadowing does not gate the exit code.** `system32` alone ships eight names
+  under two extensions apiece, so counting shadowing would leave exit 1 permanently
+  on, and a signal that is always on is not a signal. Exit 1 is for the per-entry
+  findings, which are things a person can go and fix. `--fail-on-shadow` is the
+  opt-in for anyone who wants it gate-worthy.
 - **Nothing on this `PATH` denies enumeration**, so `Unreadable` has no live
   example. Its test denies itself read on a temp directory with `icacls` and
   restores the ACE on drop. It prints a skip notice if the deny does not apply,

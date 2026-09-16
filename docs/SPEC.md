@@ -93,8 +93,8 @@ Only the matched extension comes off the name, so `python3.11.exe` is the progra
 
 Resolution order is `PATH` order first, then `PATHEXT` order within a single
 directory — both loops, because the inner one is the part people forget. Report
-every place a name resolves from, in that order, so `occurrences[0]` is the copy
-that wins. Flag separately when every occurrence sits in the *same* directory,
+every place a name resolves from, in that order. Flag separately when every
+occurrence sits in the *same* directory,
 because then `PATHEXT` decided it and no amount of reordering `PATH` will help:
 `winrm.cmd` beats `winrm.vbs` in `system32`, whatever order the filesystem lists
 them in.
@@ -102,6 +102,36 @@ them in.
 A directory that appears twice on `PATH` is enumerated once. The later entry
 already carries a `Duplicate` finding, and reading it again would report every
 program in it as shadowing itself.
+
+#### Two orderings, because there are two questions
+
+"Which copy wins" has two different correct answers and they routinely disagree.
+
+Composed order — machine then user, process-only appended — is what a **newly
+started process** resolves by. The live process `PATH` is what **this process**
+resolves by, and runtime injection goes to the *front* of it, not the back. So a
+per-shell shim beats a registry entry now and loses to it after a restart.
+
+Both are reported. Every entry carries its position in the live process `PATH`, or
+`null` when the process cannot see it at all — which is what a registry entry added
+since the process started looks like. Occurrences are ranked by live position, with
+unreachable ones last, and the fresh-process winner is reported alongside whenever
+it differs.
+
+The live example, since 2026-09-16: `node`, `npm`, `npx` and `corepack` sit in both
+`%APPDATA%\fnm\aliases\default`, a registry entry, and `...\fnm_multishells\<id>`,
+which is process-only. Cross-check:
+
+```powershell
+Get-Command node -All | Where-Object CommandType -eq Application
+# ...\fnm_multishells\20244_1789497930171\node.exe   <- what runs now
+```
+
+Before that change no name existed in both kinds of directory, so a single ordering
+looked sufficient. It was not.
+
+A registry entry the running process cannot see is reported plainly, with the only
+fix there is: restart the shell.
 
 Reparse points get reported as such rather than followed, so a `WindowsApps`
 alias stub is distinguishable from a real binary. Verified live on this machine:
@@ -121,7 +151,7 @@ searchable view want different amounts of the same audit.
 Flags:
 
 ```
-pathdoc [--json] [--scope machine|user|all] [--shadows-only] [--no-color]
+pathdoc [--json] [--scope machine|user|all] [--shadows-only] [--fail-on-shadow] [--no-color]
 ```
 
 `--scope` and `--shadows-only` filter what is **reported**. They never change how
@@ -142,7 +172,7 @@ library and one that parses this output cannot drift apart.
 
 ```json
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "capabilities": ["composition", "entryFindings", "shadowDetection"],
   "entries": [
     {
@@ -151,6 +181,7 @@ library and one that parses this output cannot drift apart.
       "raw": "%SystemRoot%\\system32",
       "expanded": "C:\\WINDOWS\\system32",
       "valueKind": "REG_EXPAND_SZ",
+      "processPosition": 1,
       "findings": []
     }
   ],
@@ -160,6 +191,8 @@ library and one that parses this output cannot drift apart.
       "occurrences": [
         {
           "entryIndex": 7,
+          "scope": "machine",
+          "processPosition": 8,
           "directory": "C:\\Program Files\\Git\\cmd",
           "fileName": "git.exe",
           "isReparsePoint": false
@@ -184,14 +217,29 @@ Rules the shape follows:
   contradict the two it derives from.
 - `findings` entries are a discriminated union on `kind`: `{"kind": "missing"}`,
   `{"kind": "duplicate", "firstSeenAt": 0}`.
+- `processPosition` is the entry's index in the **live process** `PATH`, or `null`
+  when the running process cannot see that directory at all. `null` is not an
+  error: it is what a registry entry added since the process started looks like.
 - `executables` holds **every** name found, sorted by stem, not only the contested
-  ones — around a thousand on an ordinary machine. `occurrences` is in resolution
-  order, so `occurrences[0]` is the one that wins, and a name is shadowed when
-  there is more than one. See the note on schema 2 below for why it is not filtered.
-- `occurrences[].directory` is denormalised rather than left as a join on
-  `entryIndex`. `entries` may be a filtered subset, or empty under
-  `--shadows-only`, and an occurrence that cannot be understood without an array
-  that might not be present is not much of a fact.
+  ones — around a thousand on an ordinary machine. A name is shadowed when it has
+  more than one occurrence. See the note on schema 2 below for why it is not
+  filtered.
+- `occurrences` is in **live** resolution order: copies the running process can
+  reach first, in process order, then copies it cannot, in composed order. Derive
+  the two winners like this, which is exactly what the library does:
+
+  | Question | Rule |
+  | --- | --- |
+  | What runs now? | first occurrence whose `processPosition` is not `null` |
+  | What would run in a new process? | lowest `entryIndex` among occurrences whose `scope` is not `processOnly` |
+
+  They disagree whenever runtime injection is involved, and a verdict that does not
+  say which one it means is not much use.
+- `occurrences[].directory`, `scope` and `processPosition` are denormalised rather
+  than left as a join on `entryIndex`. `entries` may be a filtered subset, or empty
+  under `--shadows-only`, and an occurrence that cannot be understood without an
+  array that might not be present is not much of a fact. Carrying all three is also
+  what makes the table above computable from the JSON alone.
 - `executables` is **never** filtered by `--scope`. Which copy of a name wins is
   decided across the whole `PATH`, so a scope-narrowed answer would be wrong
   rather than merely narrower.
@@ -218,6 +266,14 @@ exactly the kind of fact this tool exists to surface.
 So the report carries every name it found and a consumer filters. `shadows` was
 the wrong shape, not a wrong implementation of the right shape.
 
+#### Why schema 3 added `processPosition`
+
+Ranking resolution by composed index named the wrong winner for any name present
+in both a process-only directory and a registry one, because runtime injection goes
+to the front of the live `PATH` rather than the back. See "Two orderings" above.
+Nothing was removed: the composed `index` still means what it always did, so the
+pinned indices and every existing field survived the bump.
+
 ### Exit codes
 
 | Code | Meaning |
@@ -233,57 +289,24 @@ composable in a script rather than a lie waiting to happen.
 
 A closed pipe is not an error. `pathdoc | head` exits 0.
 
-#### Open question: process-only entries are ranked last, not where they really sit
+#### Only actionable findings gate the exit code
 
-Composed order puts registry entries first and appends process-only entries after
-them. That was needed to make the pinned indices work — index 0 is `system32`,
-index 7 is `Git\cmd`, index 8 is the first user entry — and it is defensible as
-"the composition Windows would build for a fresh process".
+A contested executable name is **not** a failure. Shadowing is usually correct and
+intentional, and `system32` alone ships eight names under two extensions apiece —
+`eventvwr`, `perfmon`, `services`, `hdwwiz`, `powercfg`, `manage-bde`,
+`SyncAppvPublishingServer`, `winrm` — so a machine with nothing but `system32` on
+its `PATH` would exit 1. A signal that is always on is not a signal.
 
-It is also **wrong about which copy wins** whenever a name exists in both a
-process-only directory and a registry one, because runtime injection usually goes
-at the *front* of the live `PATH`, not the back.
+Exit 1 is reserved for the per-entry findings, which are all things a person can go
+and fix: `Missing`, `NotADirectory`, `Duplicate`, `Empty`, `Relative`,
+`Unreadable`. Shadowing is always reported and never gates, unless asked:
 
-There is now a live example, courtesy of the 2026-09-16 change described under
-Verification. `node`, `npm`, `npx` and `corepack` exist in both
-`%APPDATA%\fnm\aliases\default` (a registry entry, index 22) and
-`...\fnm_multishells\<pid>_<ts>` (process-only, index 23). pathdoc reports the
-registry copy as the winner. In an `fnm`-activated shell the shim wins, because it
-sits at live position 0:
-
-```powershell
-Get-Command node -All | Where-Object CommandType -eq Application
-# ...\fnm_multishells\20244_1789497930171\node.exe
+```
+pathdoc --fail-on-shadow
 ```
 
-So pathdoc's answer is right for a fresh non-`fnm` process and wrong for the shell
-you are probably typing in. Before the change it never mattered, because `node`
-appeared exactly once.
-
-The fix is to record each entry's position in the live process `PATH` — `None` when
-it is absent from it — and rank resolution by that where it exists, falling back to
-the composed index. The composed index stays as it is, so the pinned indices and
-the JSON contract survive. **Not done**, because it changes what
-`occurrences[0]` means and that deserves a deliberate decision rather than a quiet
-patch.
-
-#### Open question: shadowing makes exit 1 the normal case
-
-As specified, a contested executable name is a finding, so it produces exit 1.
-That is what this table and the original `has_findings` both said, and it is what
-is implemented.
-
-In practice it makes the exit code close to useless as a health signal. `system32`
-alone ships eight names under two extensions apiece — `eventvwr`, `perfmon`,
-`services`, `hdwwiz`, `powercfg`, `manage-bde`, `SyncAppvPublishingServer`,
-`winrm` — so a machine with nothing but `system32` on its `PATH` still exits 1.
-On this machine dozens of names are contested and not one of them is a defect.
-
-The alternative is to let only per-entry findings drive the exit code and treat
-shadowing as informational, which would make exit 1 mean "something is actually
-wrong with your PATH". **Undecided.** Changing it is a one-line change in
-`reported_findings` plus this table, and it is a behavioural break for anything
-scripting against the current codes, so it should be decided rather than drift.
+Which is the flag to use in CI for a machine whose `PATH` is supposed to be
+pristine.
 
 ## Verification
 
@@ -314,18 +337,45 @@ and is covered by a test that denies itself read on a temporary directory instea
 
 ### The baseline moves, and that is the test's job to notice
 
-On **2026-09-16 at 17:48** something appended
-`%APPDATA%\fnm\aliases\default` to `HKCU\Environment\Path` and rewrote the value
-as `REG_SZ` where it had been `REG_EXPAND_SZ`. The user scope went from 14 entries
-to 15. Nobody asked for it and the change has not been attributed; the directory
-is a symlink `fnm` created during provisioning the day before, so `fnm` is the only
-plausible owner, but the write itself is unexplained.
+Two agent sessions edit this machine. Machine-wide changes are the trunk
+session's responsibility and the trunk announces them, so **a red acceptance test
+means ask the trunk what changed** before touching anything. Never make
+machine-wide registry writes from the project session.
 
-Two tests failed immediately, which is exactly what they are for. Treat a failure
-in this file as "the machine changed, go and find out why" — never as a number to
-adjust until the cause is understood. The `REG_SZ` part matters more than the extra
-entry: nothing in the user `PATH` uses `%VAR%` today, so it is harmless now, but a
-`REG_SZ` value will not expand one if somebody adds it later.
+It has earned its keep. On **2026-09-16 at 17:48** the trunk appended
+`%APPDATA%\fnm\aliases\default` to `HKCU\Environment\Path` while configuring an
+MCP server: `npx.cmd` could not find `node`, because `fnm` only exposes it inside
+shells it has activated, and putting the default-alias directory on `PATH` is the
+fix. Two tests failed within minutes. Later the same day GitHub CLI and starship
+went into the machine scope and zoxide, just and dust into the user scope, and the
+dead `Programs\Ollama` entry was pruned — which shifted every user index by two.
+
+The lesson is not "expect churn". It is that a baseline is only worth having if it
+is never edited to make it pass.
+
+#### `SetEnvironmentVariable` downgrades the value kind
+
+The same session's edits rewrote the user `PATH` as `REG_SZ` where it had been
+`REG_EXPAND_SZ`. Root cause, confirmed by experiment:
+
+```powershell
+[Environment]::SetEnvironmentVariable('Probe', 'C:\literal',  'User')  # -> String
+[Environment]::SetEnvironmentVariable('Probe', '%TEMP%\var',  'User')  # -> String
+```
+
+It writes `REG_SZ` **unconditionally**. It is not content-sensitive, which is the
+common assumption. Five `PATH` edits used it that day and each one silently
+downgraded the kind. It was restored afterwards, and there is now an assertion
+that every registry entry reports `REG_EXPAND_SZ` — the check that would have
+caught it.
+
+Harmless in the moment, because nothing in the user `PATH` uses `%VAR%`. Not
+harmless later: a `REG_SZ` value will not expand the first one somebody adds.
+
+Anything that ever writes `PATH` — the fix-mode slice, if it happens — must read
+with `DoNotExpandEnvironmentNames`, preserve the value kind explicitly, and never
+round-trip through `SetEnvironmentVariable`. Reading without that flag returns
+expanded paths, and writing those back replaces an indirection with a literal.
 
 ### Independent cross-checks
 
@@ -371,9 +421,10 @@ Deliberately out of slice 1, in no particular order:
    so this needs the module made public or lifted into a crate of its own. Worth
    deciding which before a second tool depends on it.
 4. **Fix mode.** Only after backup, dry-run and confirmation are designed properly.
+   Note the `SetEnvironmentVariable` trap recorded under Verification before
+   writing a line of it.
 5. **Automated shadowing cross-check** against `Get-Command -All`, as described
    above.
-6. **Settle the exit-code question** in the Open question section above.
 
 ## Design constraint carried across the whole toolkit
 

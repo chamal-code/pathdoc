@@ -32,6 +32,11 @@ const PERCENT: char = '%';
 /// after them as [`PathScope::ProcessOnly`]. Appending rather than interleaving
 /// is deliberate: the registry order is the composition Windows would build for
 /// a fresh process, and runtime injection is a separate fact layered on top.
+///
+/// Each entry also records where it sits in the live process `PATH`, which is a
+/// different question with a different answer. A registry entry added since the
+/// process started has no position at all; the process block's own entries usually
+/// come first, because that is where injection puts them.
 pub(crate) fn compose<F>(
     machine: Option<&ScopeValue>,
     user: Option<&ScopeValue>,
@@ -43,17 +48,20 @@ where
 {
     let mut entries: Vec<PathEntry> = Vec::new();
     let mut seen: HashMap<String, usize> = HashMap::new();
+    let live = live_positions(process, lookup);
 
     for (scope, value) in [(PathScope::Machine, machine), (PathScope::User, user)] {
         let Some(value) = value else { continue };
         for segment in split_segments(&value.text) {
             let effective = resolve(segment, Some(value.kind), lookup);
+            let position = live.get(&canonical_key(&effective)).copied();
             let entry = build(
                 entries.len(),
                 scope,
                 Some(value.kind),
                 segment,
                 effective,
+                position,
                 &mut seen,
             );
             entries.push(entry);
@@ -71,12 +79,14 @@ where
             if effective.is_empty() || seen.contains_key(&canonical_key(&effective)) {
                 continue;
             }
+            let position = live.get(&canonical_key(&effective)).copied();
             let entry = build(
                 entries.len(),
                 PathScope::ProcessOnly,
                 None,
                 segment,
                 effective,
+                position,
                 &mut seen,
             );
             entries.push(entry);
@@ -86,16 +96,47 @@ where
     entries
 }
 
+/// Map every directory in the live process `PATH` to its position in it.
+///
+/// First position wins for a repeat, because that is the one Windows resolves
+/// from. Empty segments contribute nothing.
+fn live_positions<F>(process: Option<&str>, lookup: &F) -> HashMap<String, usize>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let mut positions: HashMap<String, usize> = HashMap::new();
+    let Some(process) = process else {
+        return positions;
+    };
+
+    for (position, segment) in split_segments(process).into_iter().enumerate() {
+        let effective = resolve(segment, None, lookup);
+        if effective.is_empty() {
+            continue;
+        }
+        positions
+            .entry(canonical_key(&effective))
+            .or_insert(position);
+    }
+
+    positions
+}
+
 /// Build one entry and record the order-dependent findings for it.
 ///
 /// Findings that depend on the filesystem are added later, by `probe`, so this
 /// stays pure.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one call site, and bundling these into a struct would only move the list"
+)]
 fn build(
     index: usize,
     scope: PathScope,
     value_kind: Option<ValueKind>,
     raw: &str,
     effective: String,
+    process_position: Option<usize>,
     seen: &mut HashMap<String, usize>,
 ) -> PathEntry {
     let mut findings = Vec::new();
@@ -128,6 +169,7 @@ fn build(
         raw: raw.to_owned(),
         expanded,
         value_kind,
+        process_position,
         findings,
     }
 }
@@ -522,6 +564,71 @@ mod tests {
 
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].scope, PathScope::Machine);
+    }
+
+    #[test]
+    fn an_entry_records_where_it_sits_in_the_live_path() {
+        let machine = scope(r"C:\m1;C:\m2", ValueKind::Sz);
+        // The live block has them in the other order, behind an injected shim.
+        let process = r"C:\shim;C:\m2;C:\m1";
+
+        let entries = compose(Some(&machine), None, Some(process), &no_vars);
+
+        // Composed index is registry order; live position is process order.
+        assert_eq!(entries[0].raw, r"C:\m1");
+        assert_eq!(entries[0].process_position, Some(2));
+        assert_eq!(entries[1].raw, r"C:\m2");
+        assert_eq!(entries[1].process_position, Some(1));
+        // Injection goes to the front, which is the whole point of tracking this.
+        assert_eq!(entries[2].scope, PathScope::ProcessOnly);
+        assert_eq!(entries[2].process_position, Some(0));
+    }
+
+    #[test]
+    fn an_entry_the_process_cannot_see_has_no_live_position() {
+        let machine = scope(r"C:\m1;C:\just-installed", ValueKind::Sz);
+        // The process started before the second entry was added.
+        let process = r"C:\m1";
+
+        let entries = compose(Some(&machine), None, Some(process), &no_vars);
+
+        assert_eq!(entries[0].process_position, Some(0));
+        assert!(entries[0].is_live());
+        assert_eq!(entries[1].process_position, None);
+        assert!(!entries[1].is_live());
+        // Not an error. It is a restart away from being resolvable.
+        assert!(entries[1].findings.is_empty());
+    }
+
+    #[test]
+    fn with_no_process_block_nothing_has_a_live_position() {
+        let machine = scope(r"C:\m1", ValueKind::Sz);
+
+        let entries = compose(Some(&machine), None, None, &no_vars);
+
+        assert_eq!(entries[0].process_position, None);
+    }
+
+    #[test]
+    fn a_repeat_in_the_live_path_takes_its_first_position() {
+        let machine = scope(r"C:\one", ValueKind::Sz);
+        // Windows resolves from the first, so that is the position that matters.
+        let process = r"C:\other;C:\One;C:\one\";
+
+        let entries = compose(Some(&machine), None, Some(process), &no_vars);
+
+        assert_eq!(entries[0].process_position, Some(1));
+    }
+
+    #[test]
+    fn live_positions_count_empty_segments_the_way_the_process_block_does() {
+        let machine = scope(r"C:\one", ValueKind::Sz);
+        // A stray separator still occupies a slot, so positions after it shift.
+        let process = r"C:\other;;C:\one";
+
+        let entries = compose(Some(&machine), None, Some(process), &no_vars);
+
+        assert_eq!(entries[0].process_position, Some(2));
     }
 
     #[test]

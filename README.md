@@ -46,10 +46,10 @@ Exact expected numbers live in `crates/pathdoc-core/tests/this_machine.rs` and
 nowhere else, deliberately — they moved once already while this README was being
 written.
 
-Two open questions are recorded in [`docs/SPEC.md`](docs/SPEC.md) and worth knowing
-before relying on the output: process-only entries are ranked after the registry
-block, which gives the wrong winner for a name that appears in both; and contested
-names count toward exit code `1`, which makes `1` the normal case.
+"Which copy wins" is reported for both contexts, because there are two answers.
+A per-shell shim injected at the front of the live `PATH` beats a registry entry
+now and loses to it after a restart, so the output says which process a verdict
+describes, and flags any directory the running process cannot see yet.
 
 Next up is the roadmap in [`docs/SPEC.md`](docs/SPEC.md) — shell-level alias
 masking, decoding `WindowsApps` stubs to their owning package, and an env-var
@@ -84,9 +84,10 @@ rather than shelling out and scraping text.
 ## Running it
 
 ```powershell
-cargo run -p pathdoc-cli --                 # audit this machine
-cargo run -p pathdoc-cli -- --json          # the GUI contract
-cargo run -p pathdoc-cli -- --scope user    # one registry scope
+cargo run -p pathdoc-cli --                      # audit this machine
+cargo run -p pathdoc-cli -- --json               # the GUI contract
+cargo run -p pathdoc-cli -- --scope user         # one registry scope
+cargo run -p pathdoc-cli -- --fail-on-shadow     # make shadowing gate CI
 cargo run -p pathdoc-cli -- --help
 
 cargo test
@@ -100,42 +101,55 @@ Run the built binary directly rather than through `cargo run` if the process-onl
 count matters: cargo prepends its own directories to the child's `PATH`, so
 `cargo run` reports four more injected entries than a plain shell does.
 
-Exit codes are `0` clean, `1` findings reported, `2` fatal. The code describes
-what was reported, so it respects `--scope`.
+Exit codes are `0` clean, `1` actionable findings reported, `2` fatal. The code
+describes what was reported, so it respects `--scope`.
 
-Be aware that `1` is the normal case, not the exceptional one. A contested
-executable name counts as a finding, and `system32` alone ships eight names under
-two extensions apiece, so almost any Windows machine reports something. Whether
-that is the right call is an open question recorded in
-[`docs/SPEC.md`](docs/SPEC.md); do not build a script around exit `0` meaning
-"healthy" until it is settled.
+Only per-entry findings gate it — a dead directory, a duplicate, a stray separator,
+things a person can go and fix. Shadowing is always reported but never fails the
+run, because `system32` alone ships eight names under two extensions apiece and a
+signal that is on for every machine is not a signal. Use `--fail-on-shadow` when
+you do want it gate-worthy.
 
 What the output looks like:
 
 ```
-PATH composition  (8 machine, 14 user, 1 injected at runtime)
+PATH composition  (10 machine, 18 user, 2 injected at runtime)
 
-  IDX  SCOPE         VALUE TYPE     DIRECTORY
-    0  machine       REG_EXPAND_SZ  C:\WINDOWS\system32
-                                    stored as %SystemRoot%\system32
-    7  machine       REG_EXPAND_SZ  C:\Program Files\Git\cmd
-   13  user          REG_EXPAND_SZ  C:\Users\...\AppData\Local\Programs\Ollama
-   22  process-only  -              C:\Users\...\fnm_multishells\20244_1789497930171
+  IDX  LIVE  SCOPE         VALUE TYPE     DIRECTORY
+    0     1  machine       REG_EXPAND_SZ  C:\WINDOWS\system32
+                                          stored as %SystemRoot%\system32
+    7     8  machine       REG_EXPAND_SZ  C:\Program Files\Git\cmd
+    8     -  machine       REG_EXPAND_SZ  C:\Program Files\GitHub CLI\
+   27     -  user          REG_EXPAND_SZ
+   28     0  process-only  -              C:\Users\...\fnm_multishells\20244_1789497930171
 
-Findings  (1)
+  7 entries are on PATH in the registry but not in this process. Restart the
+  shell to pick them up.
 
-   13  missing  C:\Users\...\AppData\Local\Programs\Ollama
+Findings  (2)
 
-Shadowed executables  (38 of 1031 names)
+   27  empty segment
+   29  missing        C:\Users\...\AppData\Local\Programs\Ollama
+
+Shadowed executables  (48 of 1039 names)
 
   git
     wins    #7   C:\Program Files\Git\cmd\git.exe
-    hidden  #15  C:\Users\...\hermes\git\cmd\git.exe
-    hidden  #16  C:\Users\...\hermes\git\bin\git.exe
+    hidden  #16  C:\Users\...\hermes\git\cmd\git.exe
+    hidden  #17  C:\Users\...\hermes\git\bin\git.exe
+  corepack
+    wins    #28  C:\Users\...\fnm_multishells\20244_1789497930171\corepack.cmd
+    unseen  #23  C:\Users\...\fnm\aliases\default\corepack.cmd
+    note    a new process would run C:\Users\...\fnm\aliases\default\corepack.cmd
   winrm  one directory, decided by PATHEXT order
     wins    #0   C:\WINDOWS\system32\winrm.cmd
     hidden  #0   C:\WINDOWS\system32\winrm.vbs
 ```
+
+`LIVE` is the position in the current process's `PATH`; `-` means the running
+process cannot see that directory at all. `IDX` is the composed registry position,
+which is what a newly started process resolves by. The `corepack` block is what it
+looks like when those two disagree.
 
 ## Dependencies
 
@@ -164,13 +178,15 @@ stays because a normalised fixture is a silently meaningless test.
 
 ## Testing
 
-102 tests, in three groups:
+122 tests, in three groups:
 
 - **Unit tests**, portable. Every input is explicit, including the environment
   lookup, so no machine's layout leaks into the logic.
 - **`tests/this_machine.rs`**, the acceptance test. Deliberately machine-specific
-  and expected to fail elsewhere: it pins the numbers established by hand during
-  provisioning. Composition order is cross-checked at run time against
-  `[Environment]::GetEnvironmentVariable('Path', ...)` rather than hard-coded.
+  and expected to fail elsewhere. Composition order is cross-checked at run time
+  against `[Environment]::GetEnvironmentVariable('Path', ...)` rather than
+  hard-coded. Volatile counts sit in one marked block at the top; everything else is
+  keyed on directory names so installing something does not invalidate it. When it
+  goes red the machine changed — find out what before touching a number.
 - **Contract tests** in `json.rs`, pinning every JSON field name and enum tag, so
   breaking the contract a GUI depends on breaks a test.

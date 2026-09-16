@@ -73,6 +73,8 @@ mod tests {
                     raw: r"%SystemRoot%\system32".to_owned(),
                     expanded: Some(r"C:\WINDOWS\system32".to_owned()),
                     value_kind: Some(ValueKind::ExpandSz),
+                    // Second in the live PATH, behind the injected shim.
+                    process_position: Some(1),
                     findings: Vec::new(),
                 },
                 PathEntry {
@@ -81,6 +83,8 @@ mod tests {
                     raw: r"C:\Users\Someone\nope".to_owned(),
                     expanded: None,
                     value_kind: Some(ValueKind::Sz),
+                    // On PATH in the registry, but not in this process.
+                    process_position: None,
                     findings: vec![Finding::Missing, Finding::Duplicate { first_seen_at: 0 }],
                 },
                 PathEntry {
@@ -89,6 +93,8 @@ mod tests {
                     raw: r"C:\shim".to_owned(),
                     expanded: None,
                     value_kind: None,
+                    // Injected at the front, which is the whole point of schema 3.
+                    process_position: Some(0),
                     findings: Vec::new(),
                 },
             ],
@@ -104,7 +110,7 @@ mod tests {
     fn the_envelope_carries_the_schema_version_and_capabilities() {
         let value = parse(&render(&sample(), false));
 
-        assert_eq!(value["schemaVersion"], 2);
+        assert_eq!(value["schemaVersion"], 3);
         assert_eq!(
             value["capabilities"],
             serde_json::json!(["composition", "entryFindings"])
@@ -187,6 +193,8 @@ mod tests {
             stem: "git".to_owned(),
             occurrences: vec![Occurrence {
                 entry_index: 0,
+                scope: PathScope::Machine,
+                process_position: Some(1),
                 directory: r"C:\Program Files\Git\cmd".to_owned(),
                 file_name: "git.exe".to_owned(),
                 is_reparse_point: true,
@@ -198,9 +206,78 @@ mod tests {
 
         assert_eq!(value["executables"][0]["stem"], "git");
         assert_eq!(occurrence["entryIndex"], 0);
+        assert_eq!(occurrence["scope"], "machine");
+        assert_eq!(occurrence["processPosition"], 1);
         assert_eq!(occurrence["directory"], r"C:\Program Files\Git\cmd");
         assert_eq!(occurrence["fileName"], "git.exe");
         assert_eq!(occurrence["isReparsePoint"], true);
+    }
+
+    #[test]
+    fn an_entry_carries_its_live_position_or_null() {
+        let value = parse(&render(&sample(), false));
+
+        assert_eq!(value["entries"][0]["processPosition"], 1);
+        // On PATH in the registry, absent from this process. Null, not missing, so
+        // a typed consumer gets `number | null`.
+        assert!(value["entries"][1].get("processPosition").is_some());
+        assert!(value["entries"][1]["processPosition"].is_null());
+        // Runtime injection goes to the front, which is the whole reason schema 3
+        // exists.
+        assert_eq!(value["entries"][2]["processPosition"], 0);
+    }
+
+    #[test]
+    fn both_winners_are_derivable_from_the_json_alone() {
+        // The documented rules: live winner is the first occurrence with a non-null
+        // processPosition; fresh winner is the lowest entryIndex among occurrences
+        // whose scope is not processOnly.
+        let mut report = sample();
+        report.capabilities.push(Capability::ShadowDetection);
+        report.executables = vec![Resolved {
+            stem: "node".to_owned(),
+            occurrences: vec![
+                Occurrence {
+                    entry_index: 2,
+                    scope: PathScope::ProcessOnly,
+                    process_position: Some(0),
+                    directory: r"C:\shim".to_owned(),
+                    file_name: "node.exe".to_owned(),
+                    is_reparse_point: false,
+                },
+                Occurrence {
+                    entry_index: 1,
+                    scope: PathScope::User,
+                    process_position: Some(5),
+                    directory: r"C:\registry".to_owned(),
+                    file_name: "node.exe".to_owned(),
+                    is_reparse_point: false,
+                },
+            ],
+        }];
+
+        let value = parse(&render(&report, false));
+        let occurrences = match value["executables"][0]["occurrences"].as_array() {
+            Some(occurrences) => occurrences.clone(),
+            None => panic!("occurrences was not an array"),
+        };
+
+        let live = occurrences
+            .iter()
+            .find(|occurrence| !occurrence["processPosition"].is_null());
+        assert_eq!(
+            live.map(|occurrence| occurrence["directory"].clone()),
+            Some(serde_json::json!(r"C:\shim"))
+        );
+
+        let fresh = occurrences
+            .iter()
+            .filter(|occurrence| occurrence["scope"] != "processOnly")
+            .min_by_key(|occurrence| occurrence["entryIndex"].as_u64().unwrap_or(u64::MAX));
+        assert_eq!(
+            fresh.map(|occurrence| occurrence["directory"].clone()),
+            Some(serde_json::json!(r"C:\registry"))
+        );
     }
 
     #[test]
@@ -213,6 +290,8 @@ mod tests {
             stem: "gzip".to_owned(),
             occurrences: vec![Occurrence {
                 entry_index: 17,
+                scope: PathScope::User,
+                process_position: Some(17),
                 directory: r"C:\Users\Someone\vendored\usr\bin".to_owned(),
                 file_name: "gzip.exe".to_owned(),
                 is_reparse_point: false,
@@ -233,7 +312,7 @@ mod tests {
         let value = parse(&render(&sample(), true));
 
         assert_eq!(value["entries"], serde_json::json!([]));
-        assert_eq!(value["schemaVersion"], 2);
+        assert_eq!(value["schemaVersion"], 3);
     }
 
     #[test]

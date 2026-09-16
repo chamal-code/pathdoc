@@ -20,6 +20,8 @@ const BROKEN: Style = AnsiColor::Red.on_default();
 /// A finding that means something is untidy or ambiguous.
 const UNTIDY: Style = AnsiColor::Yellow.on_default();
 
+/// Width of the `LIVE` column, which holds a small number or a dash.
+const LIVE_WIDTH: usize = 4;
 /// Width of the widest scope label, `process-only`.
 const SCOPE_WIDTH: usize = 12;
 /// Width of the widest value type label, `REG_EXPAND_SZ`.
@@ -64,12 +66,26 @@ fn write_composition(out: &mut impl Write, entries: &[&PathEntry]) -> io::Result
     let index_width = index_width(entries);
     write!(out, "  {}", HEADING.render())?;
     write!(out, "{:>index_width$}  ", "IDX")?;
+    write!(out, "{:>LIVE_WIDTH$}  ", "LIVE")?;
     write!(out, "{:<SCOPE_WIDTH$}  ", "SCOPE")?;
     write!(out, "{:<KIND_WIDTH$}  ", "VALUE TYPE")?;
     writeln!(out, "DIRECTORY{}", HEADING.render_reset())?;
 
     for entry in entries {
         write!(out, "  {:>index_width$}  ", entry.index)?;
+
+        // Position in this process's PATH, which is what decides what runs now.
+        // A dash means the running process cannot see this directory at all.
+        match entry.process_position {
+            Some(position) => write!(out, "{position:>LIVE_WIDTH$}  ")?,
+            None => write!(
+                out,
+                "{}{:>LIVE_WIDTH$}{}  ",
+                MUTED.render(),
+                "-",
+                MUTED.render_reset()
+            )?,
+        }
 
         let scope = scope_label(entry.scope);
         match entry.scope {
@@ -98,7 +114,7 @@ fn write_composition(out: &mut impl Write, entries: &[&PathEntry]) -> io::Result
 
         // The stored form is a separate fact and only shown when it differs.
         if entry.expanded.is_some() {
-            let indent = 2 + index_width + 2 + SCOPE_WIDTH + 2 + KIND_WIDTH + 2;
+            let indent = 2 + index_width + 2 + LIVE_WIDTH + 2 + SCOPE_WIDTH + 2 + KIND_WIDTH + 2;
             writeln!(
                 out,
                 "{:indent$}{}stored as {}{}",
@@ -108,6 +124,26 @@ fn write_composition(out: &mut impl Write, entries: &[&PathEntry]) -> io::Result
                 MUTED.render_reset()
             )?;
         }
+    }
+
+    // A registry entry with no live position is one this process was started too
+    // early to see. Worth saying, because the fix is "restart your shell" and
+    // nothing else in the report hints at it.
+    let unseen = entries
+        .iter()
+        .filter(|entry| entry.scope != PathScope::ProcessOnly && !entry.is_live())
+        .count();
+    if unseen > 0 {
+        writeln!(out)?;
+        note(
+            out,
+            &format!(
+                "{unseen} entr{} on PATH in the registry but not in this process. \
+                 Restart the shell to pick {} up.",
+                if unseen == 1 { "y is" } else { "ies are" },
+                if unseen == 1 { "it" } else { "them" }
+            ),
+        )?;
     }
 
     Ok(())
@@ -178,6 +214,13 @@ fn write_executables(out: &mut impl Write, report: &AuditReport) -> io::Result<(
         return note(out, "No executable name resolves from more than one place.");
     }
 
+    note(
+        out,
+        "Ranked as this process resolves them. A copy this process cannot reach is\n  \
+         marked unseen, and a name a new shell would resolve differently says so.",
+    )?;
+    writeln!(out)?;
+
     for resolved in shadowed {
         write!(
             out,
@@ -198,14 +241,28 @@ fn write_executables(out: &mut impl Write, report: &AuditReport) -> io::Result<(
         }
         writeln!(out)?;
 
+        // Occurrences arrive in live resolution order, so the live winner is the
+        // first one the running process can actually reach.
+        let live_winner = resolved
+            .occurrences
+            .iter()
+            .position(|occurrence| occurrence.process_position.is_some());
+
         for (position, occurrence) in resolved.occurrences.iter().enumerate() {
-            let winning = position == 0;
-            let style = if winning { Style::new() } else { MUTED };
+            let (marker, style) = if Some(position) == live_winner {
+                ("wins  ", Style::new())
+            } else if occurrence.process_position.is_none() {
+                // On PATH in the registry, but not in this process. It wins nothing
+                // until something restarts.
+                ("unseen", MUTED)
+            } else {
+                ("hidden", MUTED)
+            };
+
             writeln!(
                 out,
-                "    {}{}  #{:<3} {}{}{}",
+                "    {}{marker}  #{:<3} {}{}{}",
                 style.render(),
-                if winning { "wins  " } else { "hidden" },
                 occurrence.entry_index,
                 join(&occurrence.directory, &occurrence.file_name),
                 if occurrence.is_reparse_point {
@@ -214,6 +271,21 @@ fn write_executables(out: &mut impl Write, report: &AuditReport) -> io::Result<(
                     ""
                 },
                 style.render_reset()
+            )?;
+        }
+
+        // The case that used to be reported wrongly: runtime injection goes to the
+        // front of the live PATH, so a shim can beat a registry entry now and lose
+        // to it in a process started from scratch.
+        if resolved.winner_depends_on_context()
+            && let Some(fresh) = resolved.fresh_winner()
+        {
+            writeln!(
+                out,
+                "    {}note    a new process would run {}{}",
+                MUTED.render(),
+                join(&fresh.directory, &fresh.file_name),
+                MUTED.render_reset()
             )?;
         }
     }
@@ -339,8 +411,17 @@ mod tests {
             raw: raw.to_owned(),
             expanded: None,
             value_kind: Some(ValueKind::ExpandSz),
+            process_position: Some(index),
             findings: Vec::new(),
         }
+    }
+
+    /// An entry the running process cannot see: added to the registry after it
+    /// started.
+    fn unseen_entry(index: usize, scope: PathScope, raw: &str) -> PathEntry {
+        let mut entry = entry(index, scope, raw);
+        entry.process_position = None;
+        entry
     }
 
     /// A report from a build without shadow detection.
@@ -355,6 +436,8 @@ mod tests {
     fn occurrence(entry_index: usize, directory: &str, file_name: &str) -> Occurrence {
         Occurrence {
             entry_index,
+            scope: PathScope::Machine,
+            process_position: Some(entry_index),
             directory: directory.to_owned(),
             file_name: file_name.to_owned(),
             is_reparse_point: false,
@@ -389,6 +472,33 @@ mod tests {
 
         assert!(text.contains(r"stored as %SystemRoot%\system32"));
         assert_eq!(text.matches("stored as").count(), 1);
+    }
+
+    #[test]
+    fn an_entry_the_process_cannot_see_is_called_out_with_a_restart_hint() {
+        // The fix is "restart your shell" and nothing else in the report hints at
+        // it, so the table has to say so.
+        let text = render(
+            &report(vec![
+                entry(0, PathScope::Machine, r"C:\WINDOWS\system32"),
+                unseen_entry(1, PathScope::Machine, r"C:\Program Files\GitHub CLI\"),
+            ]),
+            false,
+        );
+
+        assert!(text.contains("LIVE"), "the live position column is missing");
+        assert!(text.contains("1 entry is on PATH in the registry but not in this process"));
+        assert!(text.contains("Restart the shell to pick it up."));
+    }
+
+    #[test]
+    fn entries_the_process_can_all_see_get_no_restart_hint() {
+        let text = render(
+            &report(vec![entry(0, PathScope::Machine, r"C:\WINDOWS\system32")]),
+            false,
+        );
+
+        assert!(!text.contains("Restart the shell"));
     }
 
     #[test]
