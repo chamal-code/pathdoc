@@ -178,6 +178,34 @@ PowerShell at test time; shadowing does not, and automating it is on the roadmap
   absent record cannot be told from an unasked one, which is the capability lesson one
   level down. Never make it singular again, and never drop an interpreter from the
   consulted list unless it genuinely failed to answer.
+- **Kill a child, never abandon it.** Anything spawned here is spawned under a
+  timeout, and the timeout path must `kill()` **and** `wait()` — killing without
+  reaping leaves a zombie whose pipe write end may stay open, which moves the leak
+  along instead of fixing it. Never supervise a child by handing the whole `Command`
+  to a thread and calling `output()`: it works, and it leaves you no handle to kill.
+  Read on a thread, hold the `Child` here, poll `try_wait()`. This shipped once and
+  only nextest's `LEAK` marker on a **passing** test caught it, so treat `LEAK` as a
+  failure when reading test output.
+- **No test outside `this_machine.rs` may spawn a process.** A portable test that
+  spawns a shell is a portable test that fails on a slow machine, which is exactly how
+  CI went red. Inject the subprocess instead — `scan_with` takes the `ask` closure for
+  this reason — and use a fake that records its calls, so spawn *counts* become
+  assertable, which a real shell never made them. Keep one real-shell test, in
+  `this_machine.rs`, and have it **skip loudly** rather than fail when nothing answers:
+  `masking_report()` is that helper. Timing is not the exception it looks like; the one
+  test that asserts the kill path passes an explicit 200 ms timeout to `run_command`
+  rather than relying on how long anything takes.
+- **Deduplicate before spawning, not after.** Deduplicating requested interpreters
+  against the ones that had already *answered* let a repeated name spawn twice
+  whenever the first attempt failed. CI showed it as a 20-second test among 10-second
+  ones. Keying on the resolved path before any work starts is cheaper and correct
+  regardless of failures.
+- **Make the work cheaper before raising a limit.** `Get-Command -CommandType
+  Alias,Function` walks every module path for autoload discovery: 1391 constructs here
+  against 197 for `Get-Alias` plus the `Function:` drive, 218 ms against 149 ms, and
+  **identical** results — the same 24 masked names, no difference either direction.
+  Raising a timeout is a hedge because any fixed value can be exceeded; removing the
+  work is the fix. Do both, and say in the comment which is which.
 - **`winget`'s installers append a trailing `;`.** That is where the `Empty` finding
   on this machine keeps coming from. It does not accumulate — always exactly one or
   none — and edits that rebuild the value from a filtered split remove it again.

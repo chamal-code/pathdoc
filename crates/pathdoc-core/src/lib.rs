@@ -645,7 +645,20 @@ pub fn audit_with(options: &AuditOptions) -> Result<AuditReport, AuditError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AuditReport, Capability, Occurrence, PathEntry, PathScope, Resolved, audit};
+    use super::{
+        AuditOptions, AuditReport, Capability, Occurrence, PathEntry, PathScope, Resolved,
+        ShellScan, audit_with,
+    };
+
+    /// An audit with no shell scan, for the tests that do not care what a shell masks.
+    ///
+    /// Deliberately not `audit()`: that spawns an interpreter, and whether one answers
+    /// is a property of the machine, not of composition or enumeration. A portable test
+    /// that spawns a shell is a portable test that fails on a slow machine — which is
+    /// how CI found the timeout bug, on a test that asserted nothing about shells.
+    fn audit() -> Result<AuditReport, super::AuditError> {
+        audit_with(&AuditOptions::default().with_shell_scan(ShellScan::Skip))
+    }
 
     #[test]
     fn empty_report_has_no_findings() {

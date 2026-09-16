@@ -575,10 +575,40 @@ launch the Store, which a read-only audit must not do.
 `--shell-scan off` skips the scan entirely, and then `Capability::ShellMasking` is
 absent so empty `intercepts` read as "not checked" rather than "not masked" — the
 same discipline as the shadow capability. An interpreter is left out of
-`interpretersConsulted` if it cannot be found, if the spawn fails, or if it exceeds a
-ten-second timeout, which is generous against a measured 210 ms. Only interpreters
-that actually answered are listed, which is precisely what lets a consumer read an
-absent record as "clear".
+`interpretersConsulted` if it cannot be found, if the spawn fails, or if it exceeds the
+timeout. Only interpreters that actually answered are listed, which is precisely what
+lets a consumer read an absent record as "clear".
+
+#### What the shell is asked, and what happens when it does not answer
+
+The script is `Get-Alias` plus the `Function:` drive. Deliberately **not**
+`Get-Command -CommandType Alias,Function`, which walks every module path to enumerate
+commands that autoloading *could* provide: on this machine 1391 constructs against 197,
+218 ms against 149 ms, and — the part that decided it — **exactly the same 24 masked
+names, with no difference in either direction.** The expensive enumeration bought
+nothing, and it is the kind of work that balloons on a machine with a different module
+inventory.
+
+That distinction was not academic. A GitHub Actions runner exceeded the original
+ten-second timeout on every masking test, one of them twice. The timeout is now 30
+seconds, but raising it is a **hedge, not a fix** — any fixed value can be exceeded on
+a loaded machine — so the script was made cheap at the same time, and that is the
+actual remedy.
+
+Two things follow about the child process:
+
+- **It is killed on timeout, not abandoned.** The first version handed the whole
+  command to a thread and called `output()`, so there was no handle to kill and a
+  timed-out shell outlived the audit. That is shipped behaviour rather than a test
+  artifact: a long-lived consumer such as the GUI on the roadmap would accumulate one
+  orphaned shell per audit. The child is now spawned and held, and killed **and
+  reaped** on timeout, on a wait error, and on a pipe-setup failure. Reading still
+  happens on a separate thread, because polling for exit without draining the pipe
+  would deadlock the child once the buffer filled.
+- **Interpreters are deduplicated before anything is spawned**, keyed
+  case-insensitively on the resolved absolute path. The first version deduplicated
+  against the interpreters that had already *answered*, so a repeated name spawned a
+  second time whenever the first attempt failed — two timeouts instead of one.
 
 Masking does **not** gate the exit code. `diff` resolving to `Compare-Object` is
 intentional PowerShell design, not a defect, and something is masked on every Windows

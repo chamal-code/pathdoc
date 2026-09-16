@@ -248,10 +248,13 @@ stays because a normalised fixture is a silently meaningless test.
 
 ## Testing
 
-171 tests, in three groups:
+174 tests, in three groups:
 
 - **Unit tests**, portable. Every input is explicit, including the environment
-  lookup, so no machine's layout leaks into the logic.
+  lookup, so no machine's layout leaks into the logic. **Nothing here spawns a
+  process** — the shell scan is tested against an injected fake, which also makes
+  spawn counts assertable. A portable test that starts a shell is a portable test
+  that fails on a slow CI runner, which is how that rule was learned.
 - **Contract tests** in `json.rs`, pinning every JSON field name and enum tag, so
   breaking the contract a GUI depends on breaks a test.
 - **`tests/this_machine.rs`**, 24 acceptance tests. Deliberately machine-specific:
@@ -323,6 +326,28 @@ reproducible: the workflow is in this repository, so the numbers above come from
 machine neither the author nor you controls. It also means the tool is not
 pattern-matching one hand-tuned `PATH` — the assertions in `this_machine.rs` describe
 one machine, but the analysis does not.
+
+### And it found a real bug on its third run
+
+The shell scan measures at about 150 ms here. On the runner it exceeded a ten-second
+timeout on every masking test, which surfaced three defects that no amount of local
+measurement would have:
+
+- the timed-out shell was **abandoned rather than killed**, because the original code
+  handed the whole `Command` to a thread and called `output()`, leaving no handle. That
+  ships: a long-running consumer would leak one shell per audit. `cargo nextest`
+  reported it as `LEAK` on a test that *passed*
+- three portable tests asserted a live interpreter answers, so a slow machine failed
+  them. They now run against an injected fake, and the one real-shell test lives in
+  `this_machine.rs` and skips loudly
+- interpreters were deduplicated against the ones that had already *answered*, so a
+  repeated name spawned twice when the first attempt failed. One test took 20 seconds
+  where the others took 10
+
+The remedy was to make the script cheap rather than to raise the limit — `Get-Alias`
+plus the `Function:` drive instead of `Get-Command -CommandType Alias,Function`, which
+walks every module path for autoload discovery. 197 constructs against 1391, and
+identical results. The timeout went up as well, to 30 seconds, but that is a hedge.
 
 ## Licence
 
