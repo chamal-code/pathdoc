@@ -178,6 +178,13 @@ has no side effects. `profile` is the only way to see a user's own aliases and m
 this tool **execute arbitrary user code** while producing a read-only report, so it is
 opt-in. `off` spawns nothing.
 
+`--shell` chooses which interpreter to ask and may be repeated. A bare name such as
+`pwsh` is looked up in the audit's own results, so the interpreter is one the report
+vouches for; a value containing a separator is taken as a literal path. It defaults to
+Windows PowerShell. A named interpreter that cannot be found or will not answer is
+simply not consulted, and therefore never appears in `interpretersConsulted` — which
+keeps "unknown" distinct from "clear".
+
 `--scope` and `--shadows-only` filter what is **reported**. They never change how
 `PATH` is composed, and entries keep the index they hold in the full composed
 order — `--scope user` on this machine starts at index 8, not 0. A renumbered
@@ -209,15 +216,23 @@ library and one that parses this output cannot drift apart.
       "findings": []
     }
   ],
+  "interpretersConsulted": [
+    {
+      "path": "C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+      "profileLoaded": false
+    }
+  ],
   "executables": [
     {
       "stem": "sc",
-      "intercept": {
-        "construct": "alias",
-        "resolvesTo": "Set-Content",
-        "interpreter": "C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
-        "profileLoaded": false
-      },
+      "intercepts": [
+        {
+          "construct": "alias",
+          "resolvesTo": "Set-Content",
+          "interpreter": "C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+          "profileLoaded": false
+        }
+      ],
       "occurrences": [
         {
           "entryIndex": 0,
@@ -273,13 +288,26 @@ Rules the shape follows:
 - `executables` is **never** filtered by `--scope`. Which copy of a name wins is
   decided across the whole `PATH`, so a scope-narrowed answer would be wrong
   rather than merely narrower.
-- `intercept` is what a shell answers to that name **before `PATH` is searched**, or
-  `null`. `construct` is `alias` or `function`; `resolvesTo` is an alias's target and
-  `null` for a function, which is its own definition rather than a redirection;
-  `interpreter` is an **absolute path**, never a shell name, because the verdict
-  genuinely differs between interpreters on one machine — `curl` is an alias in
-  Windows PowerShell 5.1 and the real `curl.exe` in PowerShell 7. A `null` intercept
-  means "nothing masks it" only when `shellMasking` is in `capabilities`.
+- `intercepts` is what shells answer to that name **before `PATH` is searched**, one
+  record per interpreter that masks it, `[]` for none. `construct` is `alias` or
+  `function`; `resolvesTo` is an alias's target and `null` for a function, which is
+  its own definition rather than a redirection; `interpreter` is an **absolute path**,
+  never a shell name.
+- `interpretersConsulted` is the other half of reading `intercepts`, and it is what
+  makes an absent record mean something. With two shells asked, a name carrying no
+  record for one of them is otherwise ambiguous — asked and clear, or never asked?
+  **Listed there and absent from a name's `intercepts` means asked and clear.** Not
+  listed means nobody knows. Empty `intercepts` means "nothing masks it" only when
+  `shellMasking` is in `capabilities`.
+
+  Measured on this machine with both shells consulted, which is why the field is a
+  list rather than a single record:
+
+  | Name | Windows PowerShell 5.1 | PowerShell 7 |
+  | --- | --- | --- |
+  | `curl` | alias for `Invoke-WebRequest` | clear, runs `curl.exe` |
+  | `sc` | alias for `Set-Content` | clear, runs `sc.exe` |
+  | `where`, `fc`, `ls` | masked | masked |
 - `capabilities` says what the run actually computed. **An empty `executables`
   means "nothing found" only when `shadowDetection` is listed; otherwise it means
   "not computed".** The same applies to a `null` `intercept` and `shellMasking`.
@@ -304,11 +332,18 @@ exactly the kind of fact this tool exists to surface.
 So the report carries every name it found and a consumer filters. `shadows` was
 the wrong shape, not a wrong implementation of the right shape.
 
-#### Why schema 4 added `intercept`
+#### Why schema 4 added `intercepts` and `interpretersConsulted`
 
 Shell-level masking. Purely additive — nothing removed or renamed — and it extends the
 per-name records rather than becoming a new section or a `Finding`, for the reasons
 under Shell-level masking above.
+
+`intercepts` is plural from the outset. A singular field would have worked for one
+interpreter and had to become a list the first time two were consulted, and `curl`
+being masked in 5.1 and clear in 7 made that certain rather than hypothetical — a
+schema version spent on something foreseeable. This project has already spent two on
+shape corrections (2 and 3); the third was avoidable while nothing consumed the
+contract, so it was avoided.
 
 The CI workflow asserts the schema version, so a bump has to be made in the same
 commit as the change. That friction is the check working.
@@ -461,11 +496,9 @@ check that hand verification already passed.
 
 Deliberately out of slice 1, in no particular order:
 
-1. **Shell-level masking, remaining half.** Detection is implemented and specified
-   above. Still open: choosing the interpreter from the command line rather than
-   always asking Windows PowerShell, reporting more than one interpreter per name so
-   `curl` can be shown as masked in 5.1 and not in 7, and a `--fail-on-mask` if
-   anybody actually wants one.
+1. **`--fail-on-mask`**, if anybody actually asks for it. Not built: a flag with no
+   user is a guess about the future. Shell-level masking detection, multiple
+   interpreters and `--shell` are all done and specified above.
 2. **App Execution Aliases.** Decode `WindowsApps` reparse points to the owning
    package, so a Store stub is named rather than merely flagged. Slice 1 reports
    *that* a file is a reparse point but never *what* it points at, by design —
@@ -540,10 +573,12 @@ Windows machine, whereas `pwsh` is frequently an execution-alias stub that would
 launch the Store, which a read-only audit must not do.
 
 `--shell-scan off` skips the scan entirely, and then `Capability::ShellMasking` is
-absent so a `null` intercept reads as "not checked" rather than "not masked" — the
-same discipline as the shadow capability. The scan also declines to claim anything if
-no interpreter is on `PATH`, if the spawn fails, or if it exceeds a ten-second
-timeout, which is generous against a measured 210 ms.
+absent so empty `intercepts` read as "not checked" rather than "not masked" — the
+same discipline as the shadow capability. An interpreter is left out of
+`interpretersConsulted` if it cannot be found, if the spawn fails, or if it exceeds a
+ten-second timeout, which is generous against a measured 210 ms. Only interpreters
+that actually answered are listed, which is precisely what lets a consumer read an
+absent record as "clear".
 
 Masking does **not** gate the exit code. `diff` resolving to `Compare-Object` is
 intentional PowerShell design, not a defect, and something is masked on every Windows

@@ -237,18 +237,29 @@ fn write_executables(out: &mut impl Write, report: &AuditReport) -> io::Result<(
          marked unseen, and a name a new shell would resolve differently says so.",
     )?;
 
-    write_masking_note(out, report, &listed)?;
+    write_masking_note(out, report)?;
     writeln!(out)?;
 
+    // With one interpreter the section note already named it. With several, each
+    // intercept has to say which shell it came from or the report is ambiguous.
+    let name_the_shell = report.interpreters_consulted.len() > 1;
     for resolved in listed {
-        write_stem(out, resolved)?;
+        write_stem(out, resolved, name_the_shell)?;
     }
 
     Ok(())
 }
 
+/// The interpreter's file name, which is enough to tell two apart on one line.
+fn shell_label(interpreter: &str) -> &str {
+    interpreter
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or(interpreter)
+}
+
 /// One name: what intercepts it, then every file that answers to it.
-fn write_stem(out: &mut impl Write, resolved: &Resolved) -> io::Result<()> {
+fn write_stem(out: &mut impl Write, resolved: &Resolved, name_the_shell: bool) -> io::Result<()> {
     write!(
         out,
         "  {}{}{}",
@@ -268,8 +279,8 @@ fn write_stem(out: &mut impl Write, resolved: &Resolved) -> io::Result<()> {
     }
     writeln!(out)?;
 
-    // Before the files, because it wins before PATH is consulted at all.
-    if let Some(intercept) = &resolved.intercept {
+    // Before the files, because these win before PATH is consulted at all.
+    for intercept in &resolved.intercepts {
         let construct = match intercept.construct {
             ShellConstruct::Alias => "alias",
             ShellConstruct::Function => "function",
@@ -278,9 +289,17 @@ fn write_stem(out: &mut impl Write, resolved: &Resolved) -> io::Result<()> {
             .resolves_to
             .as_deref()
             .map_or_else(String::new, |to| format!(" -> {to}"));
+        // The interpreter is named per line only when more than one was asked;
+        // otherwise the section note already said which, and repeating an absolute
+        // path on every line buries the finding.
+        let shell = if name_the_shell {
+            format!("  in {}", shell_label(&intercept.interpreter))
+        } else {
+            String::new()
+        };
         writeln!(
             out,
-            "    {}intercept  {construct}{target}{}",
+            "    {}intercept  {construct}{target}{shell}{}",
             UNTIDY.render(),
             UNTIDY.render_reset()
         )?;
@@ -343,11 +362,7 @@ fn write_stem(out: &mut impl Write, resolved: &Resolved) -> io::Result<()> {
 /// the same shell for all of them, and repeating an absolute path two dozen times
 /// buries the finding. The JSON keeps it per record, where a consumer may be looking
 /// at one name in isolation.
-fn write_masking_note(
-    out: &mut impl Write,
-    report: &AuditReport,
-    listed: &[&Resolved],
-) -> io::Result<()> {
+fn write_masking_note(out: &mut impl Write, report: &AuditReport) -> io::Result<()> {
     writeln!(out)?;
 
     if !report.computed(Capability::ShellMasking) {
@@ -365,15 +380,18 @@ fn write_masking_note(
          gets the file below.",
     )?;
 
-    if let Some(intercept) = listed.iter().find_map(|r| r.intercept.as_ref()) {
-        let profile = if intercept.profile_loaded {
+    // Every interpreter that answered, not only the ones that masked something. A
+    // name absent from an interpreter listed here is clear in it, which is a verdict;
+    // absent from this list means nobody asked.
+    for interpreter in &report.interpreters_consulted {
+        let profile = if interpreter.profile_loaded {
             "user profile loaded"
         } else {
             "no user profile"
         };
         note(
             out,
-            &format!("Shell asked: {} ({profile})", intercept.interpreter),
+            &format!("Shell asked: {} ({profile})", interpreter.path),
         )?;
     }
 
@@ -472,8 +490,8 @@ mod tests {
     use super::{join, write_report};
     use anstream::StripStream;
     use pathdoc_core::{
-        AuditReport, Capability, Finding, Intercept, Occurrence, PathEntry, PathScope, Resolved,
-        ShellConstruct, ValueKind,
+        AuditReport, Capability, Finding, Intercept, Interpreter, Occurrence, PathEntry, PathScope,
+        Resolved, ShellConstruct, ValueKind,
     };
 
     /// Renders with the ANSI stripped, so assertions read like the output does.
@@ -517,6 +535,7 @@ mod tests {
         AuditReport {
             entries,
             executables: Vec::new(),
+            interpreters_consulted: Vec::new(),
             capabilities: vec![Capability::Composition, Capability::EntryFindings],
         }
     }
@@ -656,6 +675,7 @@ mod tests {
         AuditReport {
             entries,
             executables,
+            interpreters_consulted: Vec::new(),
             capabilities: vec![
                 Capability::Composition,
                 Capability::EntryFindings,
@@ -675,7 +695,7 @@ mod tests {
             ],
             vec![Resolved {
                 stem: "git".to_owned(),
-                intercept: None,
+                intercepts: Vec::new(),
                 occurrences: vec![
                     occurrence(0, r"C:\Program Files\Git\cmd", "git.exe"),
                     vendored,
@@ -703,7 +723,7 @@ mod tests {
             vec![entry(0, PathScope::User, r"C:\Users\Someone\vendored")],
             vec![Resolved {
                 stem: "gzip".to_owned(),
-                intercept: None,
+                intercepts: Vec::new(),
                 occurrences: vec![occurrence(0, r"C:\Users\Someone\vendored", "gzip.exe")],
             }],
         );
@@ -721,7 +741,7 @@ mod tests {
             vec![entry(0, PathScope::Machine, r"C:\WINDOWS\system32")],
             vec![Resolved {
                 stem: "powercfg".to_owned(),
-                intercept: None,
+                intercepts: Vec::new(),
                 occurrences: vec![
                     occurrence(0, r"C:\WINDOWS\system32", "powercfg.exe"),
                     occurrence(0, r"C:\WINDOWS\system32", "powercfg.cpl"),
@@ -734,19 +754,43 @@ mod tests {
         assert!(text.contains("one directory, decided by PATHEXT order"));
     }
 
-    /// A report from a build that also asked a shell what it masks.
+    /// The interpreter the masking tests pretend to have asked.
+    const SHELL: &str = r"C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe";
+
+    /// A report from a build that also asked one shell what it masks.
     fn with_masking(entries: Vec<PathEntry>, executables: Vec<Resolved>) -> AuditReport {
         let mut report = enumerated(entries, executables);
         report.capabilities.push(Capability::ShellMasking);
+        report.interpreters_consulted = vec![Interpreter {
+            path: SHELL.to_owned(),
+            profile_loaded: false,
+        }];
         report
     }
 
     fn intercept(construct: ShellConstruct, resolves_to: Option<&str>) -> Intercept {
+        intercept_in(SHELL, construct, resolves_to)
+    }
+
+    fn intercept_in(
+        interpreter: &str,
+        construct: ShellConstruct,
+        resolves_to: Option<&str>,
+    ) -> Intercept {
         Intercept {
             construct,
             resolves_to: resolves_to.map(str::to_owned),
-            interpreter: r"C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe".to_owned(),
+            interpreter: interpreter.to_owned(),
             profile_loaded: false,
+        }
+    }
+
+    /// One name, masked in whichever interpreters are given.
+    fn masked(stem: &str, file_name: &str, intercepts: Vec<Intercept>) -> Resolved {
+        Resolved {
+            stem: stem.to_owned(),
+            intercepts,
+            occurrences: vec![occurrence(0, r"C:\WINDOWS\system32", file_name)],
         }
     }
 
@@ -754,12 +798,11 @@ mod tests {
     fn a_masked_name_is_listed_even_when_nothing_shadows_it() {
         // `sc.exe` exists once and is perfectly healthy. The interesting fact is that
         // typing `sc` never reaches it.
-        let mut masked = Resolved {
-            stem: "sc".to_owned(),
-            intercept: None,
-            occurrences: vec![occurrence(0, r"C:\WINDOWS\system32", "sc.exe")],
-        };
-        masked.intercept = Some(intercept(ShellConstruct::Alias, Some("Set-Content")));
+        let masked = masked(
+            "sc",
+            "sc.exe",
+            vec![intercept(ShellConstruct::Alias, Some("Set-Content"))],
+        );
 
         let text = render(
             &with_masking(
@@ -778,12 +821,11 @@ mod tests {
     fn the_output_says_interception_is_shell_layer_only() {
         // Without this the report overstates its own conclusion: the file is still
         // perfectly reachable by anything doing a PATH search.
-        let mut masked = Resolved {
-            stem: "where".to_owned(),
-            intercept: None,
-            occurrences: vec![occurrence(0, r"C:\WINDOWS\system32", "where.exe")],
-        };
-        masked.intercept = Some(intercept(ShellConstruct::Alias, Some("Where-Object")));
+        let masked = masked(
+            "where",
+            "where.exe",
+            vec![intercept(ShellConstruct::Alias, Some("Where-Object"))],
+        );
 
         let text = render(
             &with_masking(
@@ -806,12 +848,11 @@ mod tests {
 
     #[test]
     fn a_function_is_reported_without_a_target() {
-        let mut masked = Resolved {
-            stem: "more".to_owned(),
-            intercept: None,
-            occurrences: vec![occurrence(0, r"C:\WINDOWS\system32", "more.com")],
-        };
-        masked.intercept = Some(intercept(ShellConstruct::Function, None));
+        let masked = masked(
+            "more",
+            "more.com",
+            vec![intercept(ShellConstruct::Function, None)],
+        );
 
         let text = render(
             &with_masking(
@@ -829,6 +870,67 @@ mod tests {
     }
 
     #[test]
+    fn with_two_shells_asked_each_intercept_names_its_own() {
+        // `curl` is the real case: an alias in Windows PowerShell 5.1 and the actual
+        // curl.exe in PowerShell 7. With one interpreter the section note is enough;
+        // with two, a line that does not say which shell is ambiguous.
+        const PWSH: &str = r"C:\Program Files\PowerShell\7\pwsh.exe";
+        let mut report = enumerated(
+            vec![entry(0, PathScope::Machine, r"C:\WINDOWS\system32")],
+            vec![masked(
+                "curl",
+                "curl.exe",
+                vec![intercept_in(
+                    SHELL,
+                    ShellConstruct::Alias,
+                    Some("Invoke-WebRequest"),
+                )],
+            )],
+        );
+        report.capabilities.push(Capability::ShellMasking);
+        report.interpreters_consulted = vec![
+            Interpreter {
+                path: SHELL.to_owned(),
+                profile_loaded: false,
+            },
+            Interpreter {
+                path: PWSH.to_owned(),
+                profile_loaded: false,
+            },
+        ];
+
+        let text = render(&report, true);
+
+        // Both shells named in the notes, so an absent record is a verdict.
+        assert!(text.contains(SHELL));
+        assert!(text.contains(PWSH));
+        // And the intercept says which one masked it.
+        assert!(
+            text.contains("intercept  alias -> Invoke-WebRequest  in powershell.exe"),
+            "got:\n{text}"
+        );
+    }
+
+    #[test]
+    fn with_one_shell_asked_the_intercept_line_stays_compact() {
+        let text = render(
+            &with_masking(
+                vec![entry(0, PathScope::Machine, r"C:\WINDOWS\system32")],
+                vec![masked(
+                    "sc",
+                    "sc.exe",
+                    vec![intercept(ShellConstruct::Alias, Some("Set-Content"))],
+                )],
+            ),
+            true,
+        );
+
+        // The note already named the shell; repeating an absolute path on every line
+        // would bury the finding.
+        assert!(text.contains("intercept  alias -> Set-Content\n"));
+    }
+
+    #[test]
     fn an_unchecked_masking_scan_says_unknown_rather_than_none() {
         // Same discipline as the shadow capability: absence of a finding must not be
         // mistaken for absence of the thing.
@@ -837,7 +939,7 @@ mod tests {
                 vec![entry(0, PathScope::Machine, r"C:\WINDOWS\system32")],
                 vec![Resolved {
                     stem: "sc".to_owned(),
-                    intercept: None,
+                    intercepts: Vec::new(),
                     occurrences: vec![
                         occurrence(0, r"C:\WINDOWS\system32", "sc.exe"),
                         occurrence(1, r"C:\other", "sc.exe"),
@@ -869,15 +971,14 @@ mod tests {
         // emitted text arrives as mojibake. An em dash in the interception note did
         // exactly that, printing "ΓÇö" on this machine. Doc comments are free to use
         // whatever they like; anything written to a terminal is not.
-        let mut masked = Resolved {
+        let masked = Resolved {
             stem: "sc".to_owned(),
-            intercept: None,
+            intercepts: vec![intercept(ShellConstruct::Alias, Some("Set-Content"))],
             occurrences: vec![
                 occurrence(0, r"C:\WINDOWS\system32", "sc.exe"),
                 occurrence(1, r"C:\other", "sc.exe"),
             ],
         };
-        masked.intercept = Some(intercept(ShellConstruct::Alias, Some("Set-Content")));
         let mut dead = entry(0, PathScope::Machine, r"C:\WINDOWS\system32");
         dead.findings = vec![Finding::Missing, Finding::Empty];
 

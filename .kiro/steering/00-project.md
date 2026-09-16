@@ -169,8 +169,15 @@ PowerShell at test time; shadowing does not, and automating it is on the roadmap
   Without that sentence the report overstates its own conclusion.
 - **The interpreter to ask comes from our own enumeration, by absolute path.**
   Resolving `powershell` by name would be a second, unaudited `PATH` search inside a
-  tool built to distrust them. Windows PowerShell and not `pwsh`, because `pwsh` here
-  is a `WindowsApps` stub that would launch the Store — a read-only audit must not.
+  tool built to distrust them. The **default** is Windows PowerShell and not `pwsh`,
+  because `pwsh` here is a `WindowsApps` execution alias and a read-only audit must
+  not risk launching the Store unasked. `--shell pwsh` honours an explicit request.
+- **A masking verdict is per interpreter, so `intercepts` is a list and the consulted
+  set is reported.** `curl` is masked in Windows PowerShell 5.1 and clear in
+  PowerShell 7 — verified, not hypothetical. Without `interpreters_consulted` an
+  absent record cannot be told from an unasked one, which is the capability lesson one
+  level down. Never make it singular again, and never drop an interpreter from the
+  consulted list unless it genuinely failed to answer.
 - **`winget`'s installers append a trailing `;`.** That is where the `Empty` finding
   on this machine keeps coming from. It does not accumulate — always exactly one or
   none — and edits that rebuild the value from a filtered split remove it again.

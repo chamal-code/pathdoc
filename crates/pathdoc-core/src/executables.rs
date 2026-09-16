@@ -196,7 +196,7 @@ fn group(mut found: Vec<Found>) -> Vec<Resolved> {
             occurrences,
             // Filled in later by `masking`, which needs the finished list to locate
             // an interpreter.
-            intercept: None,
+            intercepts: Vec::new(),
         })
         .collect();
     // `HashMap` order is arbitrary; sort so the report is reproducible.

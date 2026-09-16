@@ -47,6 +47,15 @@ pub struct Options {
     #[arg(long, value_enum, default_value_t = ShellScanArg::NoProfile)]
     pub shell_scan: ShellScanArg,
 
+    /// Which interpreter to ask. Repeat to ask several.
+    ///
+    /// A bare name such as `pwsh` is looked up in this audit's own results, so the
+    /// interpreter is one the report vouches for. A value containing a separator is
+    /// taken as a literal path. Defaults to Windows PowerShell, which exists on every
+    /// Windows machine — unlike `pwsh`, which is often a Store stub.
+    #[arg(long = "shell", value_name = "NAME_OR_PATH")]
+    pub shells: Vec<String>,
+
     /// Treat a shadowed executable name as a failure for the exit code.
     ///
     /// Off by default because shadowing is usually correct and intentional:

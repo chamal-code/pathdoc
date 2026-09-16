@@ -32,14 +32,15 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use crate::{Intercept, Resolved, ShellConstruct, ShellScan};
+use crate::{Intercept, Interpreter, Resolved, ShellConstruct, ShellScan};
 
-/// Interpreter to ask for, by stem, looked up in our own enumeration.
+/// Interpreter asked when the caller names none, by stem, looked up in our own
+/// enumeration.
 ///
 /// Windows PowerShell, not `pwsh`. It is present on every Windows machine, whereas
 /// `pwsh` is frequently a `WindowsApps` execution-alias stub that would launch the
 /// Store rather than a shell — which a read-only audit must not do.
-const INTERPRETER_STEM: &str = "powershell";
+const DEFAULT_INTERPRETER: &str = "powershell";
 
 /// Generous: the scan measures at about 210 ms on the machine this was written for.
 /// The point is to refuse to hang, not to impose a budget.
@@ -63,45 +64,96 @@ foreach ($f in Get-Command -CommandType Function) {
     'function' + $sep + $f.Name + $sep
 }";
 
-/// Ask a shell what it masks, and attach the answers to the names it masks.
+/// Ask each requested shell what it masks, and attach the answers.
 ///
-/// Returns whether the scan actually ran. `false` means the caller must not claim
-/// [`crate::Capability::ShellMasking`], because a `None` intercept would then be
-/// indistinguishable from "not checked".
-pub(crate) fn scan(executables: &mut [Resolved], mode: ShellScan) -> bool {
+/// Returns the interpreters that actually answered. An empty list means the caller
+/// must not claim [`crate::Capability::ShellMasking`], because empty `intercepts`
+/// would then be indistinguishable from "not checked".
+///
+/// The returned list is what makes an absent record meaningful. Consulted and absent
+/// from a name means that interpreter is clear for that name; not consulted means
+/// nobody knows.
+pub(crate) fn scan(
+    executables: &mut [Resolved],
+    mode: ShellScan,
+    requested: &[String],
+) -> Vec<Interpreter> {
     let ShellScan::Ask { profile } = mode else {
-        return false;
+        return Vec::new();
     };
 
-    let Some(interpreter) = interpreter_path(executables) else {
-        // No interpreter on PATH, so there is nothing to ask and nothing to claim.
-        return false;
-    };
+    let mut consulted: Vec<Interpreter> = Vec::new();
 
-    let Some(output) = run(&interpreter, profile) else {
-        return false;
-    };
-
-    let constructs = parse(&output);
-    for resolved in executables {
-        if let Some((construct, resolves_to)) = constructs.get(&resolved.stem) {
-            resolved.intercept = Some(Intercept {
-                construct: *construct,
-                resolves_to: resolves_to.clone(),
-                interpreter: interpreter.clone(),
-                profile_loaded: profile,
-            });
+    for choice in resolve_choices(executables, requested) {
+        // A repeat would only produce a duplicate answer.
+        if consulted
+            .iter()
+            .any(|already| already.path.eq_ignore_ascii_case(&choice))
+        {
+            continue;
         }
+
+        let Some(output) = run(&choice, profile) else {
+            // No answer, so it is not recorded as consulted, and every name stays
+            // "unknown" for this interpreter rather than "clear".
+            continue;
+        };
+
+        let constructs = parse(&output);
+        for resolved in executables.iter_mut() {
+            if let Some((construct, resolves_to)) = constructs.get(&resolved.stem) {
+                resolved.intercepts.push(Intercept {
+                    construct: *construct,
+                    resolves_to: resolves_to.clone(),
+                    interpreter: choice.clone(),
+                    profile_loaded: profile,
+                });
+            }
+        }
+
+        consulted.push(Interpreter {
+            path: choice,
+            profile_loaded: profile,
+        });
     }
 
-    true
+    consulted
 }
 
-/// The absolute path of the interpreter, taken from our own enumeration.
-fn interpreter_path(executables: &[Resolved]) -> Option<String> {
+/// Turn the caller's choices into absolute interpreter paths.
+fn resolve_choices(executables: &[Resolved], requested: &[String]) -> Vec<String> {
+    if requested.is_empty() {
+        return interpreter_path(executables, DEFAULT_INTERPRETER)
+            .into_iter()
+            .collect();
+    }
+
+    requested
+        .iter()
+        .filter_map(|choice| {
+            if looks_like_a_path(choice) {
+                // Taken at face value: the caller asked for this exact file.
+                Some(choice.clone())
+            } else {
+                interpreter_path(executables, &choice.to_lowercase())
+            }
+        })
+        .collect()
+}
+
+/// Whether a choice is a path rather than a stem to look up.
+fn looks_like_a_path(choice: &str) -> bool {
+    choice.contains('\\') || choice.contains('/')
+}
+
+/// The absolute path of an interpreter, taken from our own enumeration.
+///
+/// Deliberately not a fresh `PATH` search. Looking the stem up in what this crate
+/// already resolved means the interpreter is one the audit itself vouched for.
+fn interpreter_path(executables: &[Resolved], stem: &str) -> Option<String> {
     let resolved = executables
         .iter()
-        .find(|candidate| candidate.stem == INTERPRETER_STEM)?;
+        .find(|candidate| candidate.stem == stem)?;
 
     // The copy this process would actually run, since that is the shell a user in
     // this session would get.
@@ -189,7 +241,7 @@ fn parse(output: &str) -> HashMap<String, (ShellConstruct, Option<String>)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{interpreter_path, parse, scan};
+    use super::{interpreter_path, parse, resolve_choices, scan};
     use crate::{Occurrence, PathScope, Resolved, ShellConstruct, ShellScan};
 
     fn resolved(stem: &str, directory: &str, file_name: &str) -> Resolved {
@@ -203,8 +255,16 @@ mod tests {
                 file_name: file_name.to_owned(),
                 is_reparse_point: false,
             }],
-            intercept: None,
+            intercepts: Vec::new(),
         }
+    }
+
+    /// Windows PowerShell's real location, for the tests that spawn it.
+    fn windows_powershell_dir() -> String {
+        format!(
+            r"{}\System32\WindowsPowerShell\v1.0",
+            std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\WINDOWS".to_owned())
+        )
     }
 
     // ---- parsing, entirely portable ----
@@ -278,7 +338,7 @@ mod tests {
         ];
 
         assert_eq!(
-            interpreter_path(&executables),
+            interpreter_path(&executables, "powershell"),
             Some(r"C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe".to_owned())
         );
     }
@@ -293,7 +353,7 @@ mod tests {
         )];
 
         assert_eq!(
-            interpreter_path(&executables),
+            interpreter_path(&executables, "powershell"),
             Some(r"C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe".to_owned())
         );
     }
@@ -302,31 +362,123 @@ mod tests {
     fn with_no_interpreter_on_path_there_is_nothing_to_ask() {
         let executables = vec![resolved("git", r"C:\Program Files\Git\cmd", "git.exe")];
 
-        assert_eq!(interpreter_path(&executables), None);
+        assert_eq!(interpreter_path(&executables, "powershell"), None);
+    }
+
+    // ---- choosing which interpreters to ask ----
+
+    #[test]
+    fn with_no_choice_the_default_interpreter_is_asked() {
+        let executables = vec![
+            resolved("git", r"C:\Program Files\Git\cmd", "git.exe"),
+            resolved("powershell", r"C:\WINDOWS\ps", "powershell.exe"),
+        ];
+
+        assert_eq!(
+            resolve_choices(&executables, &[]),
+            vec![r"C:\WINDOWS\ps\powershell.exe".to_owned()]
+        );
+    }
+
+    #[test]
+    fn a_stem_is_looked_up_in_the_enumeration_rather_than_searched_for() {
+        // The point: the interpreter is one this audit already resolved, not the
+        // result of a second `PATH` search inside a tool built to distrust them.
+        let executables = vec![
+            resolved("powershell", r"C:\WINDOWS\ps", "powershell.exe"),
+            resolved("pwsh", r"C:\Program Files\PowerShell\7", "pwsh.exe"),
+        ];
+
+        assert_eq!(
+            resolve_choices(&executables, &["pwsh".to_owned()]),
+            vec![r"C:\Program Files\PowerShell\7\pwsh.exe".to_owned()]
+        );
+    }
+
+    #[test]
+    fn an_explicit_path_is_taken_at_face_value() {
+        // The caller named a file rather than a name to resolve, so no lookup.
+        let executables = vec![resolved("powershell", r"C:\WINDOWS\ps", "powershell.exe")];
+
+        assert_eq!(
+            resolve_choices(&executables, &[r"D:\custom\pwsh.exe".to_owned()]),
+            vec![r"D:\custom\pwsh.exe".to_owned()]
+        );
+    }
+
+    #[test]
+    fn a_stem_that_is_not_on_path_is_dropped_rather_than_guessed_at() {
+        let executables = vec![resolved("powershell", r"C:\WINDOWS\ps", "powershell.exe")];
+
+        // `pwsh` is not installed, so it is simply not consulted — and therefore
+        // never appears in `interpreters_consulted`, which is what keeps "unknown"
+        // distinct from "clear".
+        assert!(resolve_choices(&executables, &["pwsh".to_owned()]).is_empty());
+    }
+
+    #[test]
+    fn several_interpreters_can_be_asked() {
+        let executables = vec![
+            resolved("powershell", r"C:\WINDOWS\ps", "powershell.exe"),
+            resolved("pwsh", r"C:\pwsh7", "pwsh.exe"),
+        ];
+
+        assert_eq!(
+            resolve_choices(&executables, &["powershell".to_owned(), "pwsh".to_owned()]),
+            vec![
+                r"C:\WINDOWS\ps\powershell.exe".to_owned(),
+                r"C:\pwsh7\pwsh.exe".to_owned(),
+            ]
+        );
     }
 
     // ---- the scan as a whole ----
 
     #[test]
-    fn a_skipped_scan_claims_nothing() {
+    fn a_skipped_scan_consults_nobody() {
         let mut executables = vec![resolved("sc", r"C:\WINDOWS\system32", "sc.exe")];
 
-        let ran = scan(&mut executables, ShellScan::Skip);
+        let consulted = scan(&mut executables, ShellScan::Skip, &[]);
 
-        assert!(!ran, "a skipped scan must not report itself as having run");
-        assert!(executables[0].intercept.is_none());
+        assert!(
+            consulted.is_empty(),
+            "a skipped scan must not report an interpreter as consulted"
+        );
+        assert!(executables[0].intercepts.is_empty());
     }
 
     #[test]
-    fn a_scan_with_no_interpreter_claims_nothing() {
+    fn a_scan_with_no_interpreter_consults_nobody() {
         let mut executables = vec![resolved("sc", r"C:\WINDOWS\system32", "sc.exe")];
 
-        let ran = scan(&mut executables, ShellScan::Ask { profile: false });
+        let consulted = scan(&mut executables, ShellScan::Ask { profile: false }, &[]);
 
-        // No `powershell` in this list, so the scan cannot run — and must say so
-        // rather than leaving a null intercept that reads as "not masked".
-        assert!(!ran);
-        assert!(executables[0].intercept.is_none());
+        // No `powershell` in this list, so nothing can be asked — and nothing may be
+        // claimed, or an empty `intercepts` would read as "nothing masks it".
+        assert!(consulted.is_empty());
+        assert!(executables[0].intercepts.is_empty());
+    }
+
+    #[test]
+    fn the_same_interpreter_named_twice_is_asked_once() {
+        let interpreter = windows_powershell_dir();
+        let mut executables = vec![
+            resolved("powershell", &interpreter, "powershell.exe"),
+            resolved("sc", r"C:\WINDOWS\system32", "sc.exe"),
+        ];
+
+        let consulted = scan(
+            &mut executables,
+            ShellScan::Ask { profile: false },
+            &["powershell".to_owned(), "powershell".to_owned()],
+        );
+
+        assert_eq!(consulted.len(), 1, "consulted: {consulted:?}");
+        assert_eq!(
+            executables[1].intercepts.len(),
+            1,
+            "`sc` should be reported once, not once per repeat"
+        );
     }
 
     #[test]
@@ -334,29 +486,68 @@ mod tests {
         // Portable across Windows: `sc` for Set-Content and `where` for Where-Object
         // are built in, present without a profile, and both mask a real system32
         // executable.
-        let interpreter = format!(
-            r"{}\System32\WindowsPowerShell\v1.0",
-            std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\WINDOWS".to_owned())
-        );
+        let interpreter = windows_powershell_dir();
         let mut executables = vec![
             resolved("powershell", &interpreter, "powershell.exe"),
             resolved("sc", r"C:\WINDOWS\system32", "sc.exe"),
             resolved("pathdoc-not-a-real-name", r"C:\nowhere", "nope.exe"),
         ];
 
-        let ran = scan(&mut executables, ShellScan::Ask { profile: false });
-        assert!(ran, "the scan should have run against {interpreter}");
+        let consulted = scan(&mut executables, ShellScan::Ask { profile: false }, &[]);
+        assert_eq!(
+            consulted.len(),
+            1,
+            "the scan should have consulted {interpreter}"
+        );
+        assert!(consulted[0].path.ends_with("powershell.exe"));
+        assert!(!consulted[0].profile_loaded);
 
-        let Some(intercept) = &executables[1].intercept else {
-            panic!("`sc` is a built-in alias and should have been reported")
+        let [intercept] = executables[1].intercepts.as_slice() else {
+            panic!(
+                "`sc` is a built-in alias and should have exactly one intercept, got {:?}",
+                executables[1].intercepts
+            )
         };
         assert_eq!(intercept.construct, ShellConstruct::Alias);
         assert_eq!(intercept.resolves_to.as_deref(), Some("Set-Content"));
         assert!(intercept.interpreter.ends_with("powershell.exe"));
         assert!(!intercept.profile_loaded);
 
-        // A name nothing answers to stays clean, which is what makes the capability
-        // flag meaningful rather than decorative.
-        assert!(executables[2].intercept.is_none());
+        // A name nothing answers to stays clear. Combined with the interpreter being
+        // in the consulted list, that is a real verdict rather than a gap.
+        assert!(executables[2].intercepts.is_empty());
+    }
+
+    #[test]
+    fn an_explicit_path_to_the_real_shell_also_works() {
+        // The `--shell` route: a caller naming a file rather than a name to resolve.
+        let path = format!(r"{}\powershell.exe", windows_powershell_dir());
+        let mut executables = vec![resolved("sc", r"C:\WINDOWS\system32", "sc.exe")];
+
+        let consulted = scan(
+            &mut executables,
+            ShellScan::Ask { profile: false },
+            std::slice::from_ref(&path),
+        );
+
+        assert_eq!(consulted.len(), 1);
+        assert_eq!(consulted[0].path, path);
+        // And no `powershell` entry was needed in the enumeration for it.
+        assert_eq!(executables[0].intercepts.len(), 1);
+    }
+
+    #[test]
+    fn an_interpreter_that_cannot_be_run_is_not_reported_as_consulted() {
+        let mut executables = vec![resolved("sc", r"C:\WINDOWS\system32", "sc.exe")];
+
+        let consulted = scan(
+            &mut executables,
+            ShellScan::Ask { profile: false },
+            &[r"C:\pathdoc\no-such-shell.exe".to_owned()],
+        );
+
+        // Nothing answered, so every name stays unknown for it rather than clear.
+        assert!(consulted.is_empty());
+        assert!(executables[0].intercepts.is_empty());
     }
 }

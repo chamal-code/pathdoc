@@ -54,6 +54,14 @@ impl Default for ShellScan {
 pub struct AuditOptions {
     /// Whether to ask a shell what it masks. Defaults to asking without a profile.
     pub shell_scan: ShellScan,
+    /// Which interpreters to ask, each either a bare stem to look up in this crate's
+    /// own enumeration or an absolute path.
+    ///
+    /// Empty means the default: Windows PowerShell, which exists on every Windows
+    /// machine. A stem is preferred over a path where possible, because looking it up
+    /// in the enumeration means the interpreter itself has been audited rather than
+    /// found by a second, untrusted `PATH` search.
+    pub shell_interpreters: Vec<String>,
 }
 
 impl AuditOptions {
@@ -61,6 +69,17 @@ impl AuditOptions {
     #[must_use]
     pub fn with_shell_scan(mut self, shell_scan: ShellScan) -> Self {
         self.shell_scan = shell_scan;
+        self
+    }
+
+    /// Set which interpreters to ask. Empty restores the default.
+    #[must_use]
+    pub fn with_shell_interpreters<I, S>(mut self, interpreters: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.shell_interpreters = interpreters.into_iter().map(Into::into).collect();
         self
     }
 }
@@ -88,12 +107,19 @@ impl AuditOptions {
 /// and a freshly started process resolve differently — so both are now reported
 /// rather than one being guessed at.
 ///
-/// `4` added [`Resolved::intercept`] and [`Capability::ShellMasking`]. Purely
-/// additive: nothing was removed or renamed. Shell-level masking extends the
-/// per-name records rather than becoming a [`Finding`] or a section of its own,
-/// because a `Finding` describes a directory and masking describes none — the entry
-/// holding `sc.exe` is perfectly healthy — and because masking is the same question
-/// as shadowing one layer up. Both answer "if I type this, what runs".
+/// `4` added [`Resolved::intercepts`], [`AuditReport::interpreters_consulted`] and
+/// [`Capability::ShellMasking`]. Purely additive: nothing was removed or renamed.
+/// Shell-level masking extends the per-name records rather than becoming a
+/// [`Finding`] or a section of its own, because a `Finding` describes a directory and
+/// masking describes none — the entry holding `sc.exe` is perfectly healthy — and
+/// because masking is the same question as shadowing one layer up. Both answer "if I
+/// type this, what runs".
+///
+/// `intercepts` is a list rather than a single record because one name can be masked
+/// in one interpreter and clear in another: `curl` is an alias in Windows PowerShell
+/// 5.1 and the real `curl.exe` in PowerShell 7. A singular field would have had to
+/// become a list the first time two interpreters were consulted, and that would have
+/// cost a schema version for nothing.
 pub const SCHEMA_VERSION: u32 = 4;
 
 /// Where a `PATH` entry came from.
@@ -233,6 +259,23 @@ pub struct Intercept {
     pub profile_loaded: bool,
 }
 
+/// An interpreter that was actually asked what it masks.
+///
+/// [`AuditReport::interpreters_consulted`] is what makes an *absent* intercept mean
+/// something. With more than one interpreter in play, a name carrying no record for
+/// `pwsh` is otherwise ambiguous — was `pwsh` asked and clear, or never asked at all?
+/// Listed here means asked and answered, so "consulted, but absent from this name's
+/// [`Resolved::intercepts`]" is a real verdict rather than a gap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
+pub struct Interpreter {
+    /// Absolute path of the interpreter.
+    pub path: String,
+    /// Whether it loaded its user profile.
+    pub profile_loaded: bool,
+}
+
 /// One directory on the composed `PATH`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -329,11 +372,15 @@ pub struct Resolved {
     /// So `occurrences[0]` is what this process runs — see [`Resolved::live_winner`]
     /// for the version that says so honestly when nothing here is live at all.
     pub occurrences: Vec<Occurrence>,
-    /// What a shell resolves this name to instead, if anything does.
+    /// What shells resolve this name to instead, one record per interpreter that
+    /// masks it.
     ///
-    /// `None` means "nothing masks it" only when [`Capability::ShellMasking`] is
-    /// listed on the report. Otherwise it means the scan did not run.
-    pub intercept: Option<Intercept>,
+    /// Empty means "no consulted interpreter masks it" only when
+    /// [`Capability::ShellMasking`] is listed on the report; otherwise the scan did
+    /// not run. To ask about a specific interpreter, check
+    /// [`AuditReport::interpreters_consulted`] first — present there and absent here
+    /// means asked and clear.
+    pub intercepts: Vec<Intercept>,
 }
 
 impl Resolved {
@@ -384,10 +431,21 @@ impl Resolved {
         self.occurrences.len() > 1
     }
 
-    /// Whether a shell answers to this name before `PATH` is searched.
+    /// Whether any consulted shell answers to this name before `PATH` is searched.
     #[must_use]
     pub fn is_intercepted(&self) -> bool {
-        self.intercept.is_some()
+        !self.intercepts.is_empty()
+    }
+
+    /// What one particular interpreter resolves this name to, if it masks it.
+    ///
+    /// `None` is only meaningful alongside [`AuditReport::interpreters_consulted`]:
+    /// consulted and `None` here means clear; not consulted means unknown.
+    #[must_use]
+    pub fn intercept_by(&self, interpreter: &str) -> Option<&Intercept> {
+        self.intercepts
+            .iter()
+            .find(|intercept| intercept.interpreter.eq_ignore_ascii_case(interpreter))
     }
 
     /// Whether every occurrence sits in the same directory, making this a contest
@@ -416,6 +474,11 @@ pub struct AuditReport {
     pub entries: Vec<PathEntry>,
     /// Every executable name found, sorted by stem. See [`Resolved`].
     pub executables: Vec<Resolved>,
+    /// Interpreters that were asked what they mask. See [`Interpreter`].
+    ///
+    /// Empty when no shell was consulted, in which case
+    /// [`Capability::ShellMasking`] is also absent.
+    pub interpreters_consulted: Vec<Interpreter>,
     /// What this run actually computed. See [`Capability`].
     pub capabilities: Vec<Capability>,
 }
@@ -438,6 +501,17 @@ impl AuditReport {
     #[must_use]
     pub fn computed(&self, capability: Capability) -> bool {
         self.capabilities.contains(&capability)
+    }
+
+    /// Whether a given interpreter was asked what it masks.
+    ///
+    /// The other half of reading [`Resolved::intercepts`]: this is what turns an
+    /// absent record into "asked and clear" rather than "never asked".
+    #[must_use]
+    pub fn consulted(&self, interpreter: &str) -> bool {
+        self.interpreters_consulted
+            .iter()
+            .any(|consulted| consulted.path.eq_ignore_ascii_case(interpreter))
     }
 }
 
@@ -463,6 +537,9 @@ pub struct JsonReport {
     /// wins is decided across the whole `PATH`, so a scoped answer would be wrong
     /// rather than merely narrower.
     pub executables: Vec<Resolved>,
+    /// Interpreters that were asked what they mask. Read alongside each name's
+    /// `intercepts`: listed here and absent there means asked and clear.
+    pub interpreters_consulted: Vec<Interpreter>,
 }
 
 #[cfg(feature = "serde")]
@@ -473,6 +550,7 @@ impl From<AuditReport> for JsonReport {
             capabilities: report.capabilities,
             entries: report.entries,
             executables: report.executables,
+            interpreters_consulted: report.interpreters_consulted,
         }
     }
 }
@@ -540,20 +618,27 @@ pub fn audit_with(options: &AuditOptions) -> Result<AuditReport, AuditError> {
 
     // After enumeration, because the interpreter to ask is found in its results
     // rather than by a second, unaudited `PATH` search.
-    let masking_ran = masking::scan(&mut executables, options.shell_scan);
+    let interpreters_consulted = masking::scan(
+        &mut executables,
+        options.shell_scan,
+        &options.shell_interpreters,
+    );
 
     let mut capabilities = vec![
         Capability::Composition,
         Capability::EntryFindings,
         Capability::ShadowDetection,
     ];
-    if masking_ran {
+    // Claimed only if some interpreter actually answered. Otherwise an empty
+    // `intercepts` would read as "nothing masks this".
+    if !interpreters_consulted.is_empty() {
         capabilities.push(Capability::ShellMasking);
     }
 
     Ok(AuditReport {
         entries,
         executables,
+        interpreters_consulted,
         capabilities,
     })
 }
@@ -690,7 +775,7 @@ mod tests {
                 file_name: "gzip.exe".to_owned(),
                 is_reparse_point: false,
             }],
-            intercept: None,
+            intercepts: Vec::new(),
         };
 
         assert!(!resolved.is_shadowed());
@@ -724,7 +809,7 @@ mod tests {
         let resolved = Resolved {
             stem: "powercfg".to_owned(),
             occurrences: vec![occurrence("powercfg.exe"), occurrence("powercfg.cpl")],
-            intercept: None,
+            intercepts: Vec::new(),
         };
 
         assert!(resolved.is_shadowed());
@@ -757,7 +842,7 @@ mod tests {
         let resolved = Resolved {
             stem: "node".to_owned(),
             occurrences: vec![shim, registry],
-            intercept: None,
+            intercepts: Vec::new(),
         };
 
         assert_eq!(

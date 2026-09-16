@@ -771,8 +771,12 @@ fn the_shell_masks_real_system32_tools() {
         ("curl", "Invoke-WebRequest"),
     ] {
         let resolved = resolved(&report, stem);
-        let Some(intercept) = &resolved.intercept else {
-            panic!("`{stem}` is a built-in PowerShell alias and should be reported as masked")
+        // One interpreter is consulted by default, so exactly one record.
+        let [intercept] = resolved.intercepts.as_slice() else {
+            panic!(
+                "`{stem}` is a built-in PowerShell alias and should have one intercept, got {:?}",
+                resolved.intercepts
+            )
         };
 
         assert_eq!(intercept.construct, ShellConstruct::Alias);
@@ -807,8 +811,11 @@ fn a_function_masks_more_com() {
     // `more.com` is a real file in system32, and `more` is a built-in function.
     assert_present_in(more, r"\WINDOWS\system32", "more.com");
 
-    let Some(intercept) = &more.intercept else {
-        panic!("`more` is a built-in function and should be reported as masked")
+    let [intercept] = more.intercepts.as_slice() else {
+        panic!(
+            "`more` is a built-in function and should have one intercept, got {:?}",
+            more.intercepts
+        )
     };
     assert_eq!(intercept.construct, ShellConstruct::Function);
     // A function is its own definition, so there is nothing to point at.
@@ -847,9 +854,13 @@ fn turning_the_scan_off_reports_unknown_rather_than_nothing() {
 
     // Nothing was asked, so nothing may be claimed.
     assert!(!report.computed(Capability::ShellMasking));
+    assert!(
+        report.interpreters_consulted.is_empty(),
+        "nothing was asked, so nothing may be listed as consulted"
+    );
     for resolved in &report.executables {
         assert!(
-            resolved.intercept.is_none(),
+            resolved.intercepts.is_empty(),
             "`{}` reports an intercept from a scan that never ran",
             resolved.stem
         );
@@ -857,4 +868,68 @@ fn turning_the_scan_off_reports_unknown_rather_than_nothing() {
     // And the rest of the audit is unaffected.
     assert!(report.computed(Capability::ShadowDetection));
     assert!(!report.executables.is_empty());
+}
+
+#[test]
+#[ignore = "machine-specific: see `just test-machine`"]
+fn one_name_can_be_masked_in_one_shell_and_clear_in_another() {
+    // The case a singular `intercept` could not have expressed, and the reason the
+    // field is a list. Measured on this machine with both shells consulted:
+    //
+    //   curl   masked in Windows PowerShell 5.1, clear in PowerShell 7
+    //   sc     masked in Windows PowerShell 5.1, clear in PowerShell 7
+    //   where  masked in both
+    //
+    // `interpretersConsulted` is what makes "clear" a verdict rather than a gap: both
+    // shells are listed, so a name carrying no record for one of them was asked and
+    // said no.
+    let report = match audit_with(
+        &AuditOptions::default().with_shell_interpreters(["powershell", "pwsh"]),
+    ) {
+        Ok(report) => report,
+        Err(err) => panic!("audit failed: {err}"),
+    };
+
+    let Some(five) = report
+        .interpreters_consulted
+        .iter()
+        .find(|i| i.path.to_lowercase().ends_with(r"\powershell.exe"))
+    else {
+        panic!("Windows PowerShell was not consulted")
+    };
+    let Some(seven) = report
+        .interpreters_consulted
+        .iter()
+        .find(|i| i.path.to_lowercase().ends_with(r"\pwsh.exe"))
+    else {
+        // PowerShell 7 is not always installed, and its absence is not a failure of
+        // this tool. Said out loud so a vacuous pass is not mistaken for a verified
+        // one.
+        eprintln!("skipped: pwsh did not answer, so cross-shell disagreement was not exercised");
+        return;
+    };
+
+    // Both consulted, so both verdicts below are real answers.
+    assert!(report.consulted(&five.path));
+    assert!(report.consulted(&seven.path));
+
+    for stem in ["curl", "sc"] {
+        let resolved = resolved(&report, stem);
+        assert!(
+            resolved.intercept_by(&five.path).is_some(),
+            "`{stem}` should be masked in Windows PowerShell; intercepts: {:?}",
+            resolved.intercepts
+        );
+        assert!(
+            resolved.intercept_by(&seven.path).is_none(),
+            "`{stem}` should be clear in PowerShell 7; intercepts: {:?}",
+            resolved.intercepts
+        );
+    }
+
+    // And a name both agree on, so the test would notice if one shell simply
+    // returned nothing at all.
+    let both = resolved(&report, "where");
+    assert!(both.intercept_by(&five.path).is_some());
+    assert!(both.intercept_by(&seven.path).is_some());
 }

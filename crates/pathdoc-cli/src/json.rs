@@ -31,6 +31,8 @@ pub(crate) fn write_json(
         // Never filtered. Which copy of a name wins is decided across the whole
         // PATH, so a scope-narrowed answer would be wrong rather than narrower.
         executables: report.executables.clone(),
+        // Not filtered either: it is the key to reading `intercepts` at all.
+        interpreters_consulted: report.interpreters_consulted.clone(),
     };
 
     serde_json::to_writer_pretty(&mut *out, &envelope).map_err(io::Error::other)?;
@@ -41,8 +43,8 @@ pub(crate) fn write_json(
 mod tests {
     use super::write_json;
     use pathdoc_core::{
-        AuditReport, Capability, Finding, Intercept, JsonReport, Occurrence, PathEntry, PathScope,
-        Resolved, ShellConstruct, ValueKind,
+        AuditReport, Capability, Finding, Intercept, Interpreter, JsonReport, Occurrence,
+        PathEntry, PathScope, Resolved, ShellConstruct, ValueKind,
     };
 
     fn render(report: &AuditReport, shadows_only: bool) -> String {
@@ -99,6 +101,7 @@ mod tests {
                 },
             ],
             executables: Vec::new(),
+            interpreters_consulted: Vec::new(),
             capabilities: vec![Capability::Composition, Capability::EntryFindings],
         }
     }
@@ -191,7 +194,7 @@ mod tests {
         report.capabilities.push(Capability::ShadowDetection);
         report.executables = vec![Resolved {
             stem: "git".to_owned(),
-            intercept: None,
+            intercepts: Vec::new(),
             occurrences: vec![Occurrence {
                 entry_index: 0,
                 scope: PathScope::Machine,
@@ -237,7 +240,7 @@ mod tests {
         report.capabilities.push(Capability::ShadowDetection);
         report.executables = vec![Resolved {
             stem: "node".to_owned(),
-            intercept: None,
+            intercepts: Vec::new(),
             occurrences: vec![
                 Occurrence {
                     entry_index: 2,
@@ -290,7 +293,7 @@ mod tests {
         report.capabilities.push(Capability::ShadowDetection);
         report.executables = vec![Resolved {
             stem: "gzip".to_owned(),
-            intercept: None,
+            intercepts: Vec::new(),
             occurrences: vec![Occurrence {
                 entry_index: 17,
                 scope: PathScope::User,
@@ -317,13 +320,13 @@ mod tests {
         report.capabilities.push(Capability::ShellMasking);
         report.executables = vec![Resolved {
             stem: "sc".to_owned(),
-            intercept: Some(Intercept {
+            intercepts: vec![Intercept {
                 construct: ShellConstruct::Alias,
                 resolves_to: Some("Set-Content".to_owned()),
                 interpreter: r"C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe"
                     .to_owned(),
                 profile_loaded: false,
-            }),
+            }],
             occurrences: vec![Occurrence {
                 entry_index: 0,
                 scope: PathScope::Machine,
@@ -335,7 +338,7 @@ mod tests {
         }];
 
         let value = parse(&render(&report, false));
-        let intercept = &value["executables"][0]["intercept"];
+        let intercept = &value["executables"][0]["intercepts"][0];
 
         assert_eq!(intercept["construct"], "alias");
         assert_eq!(intercept["resolvesTo"], "Set-Content");
@@ -354,16 +357,16 @@ mod tests {
         report.capabilities.push(Capability::ShellMasking);
         report.executables = vec![Resolved {
             stem: "more".to_owned(),
-            intercept: Some(Intercept {
+            intercepts: vec![Intercept {
                 construct: ShellConstruct::Function,
                 resolves_to: None,
                 interpreter: r"C:\WINDOWS\powershell.exe".to_owned(),
                 profile_loaded: true,
-            }),
+            }],
             occurrences: Vec::new(),
         }];
 
-        let intercept = parse(&render(&report, false))["executables"][0]["intercept"].clone();
+        let intercept = parse(&render(&report, false))["executables"][0]["intercepts"][0].clone();
 
         assert_eq!(intercept["construct"], "function");
         // A function is its own definition, so `string | null` and not a fake target.
@@ -373,7 +376,7 @@ mod tests {
     }
 
     #[test]
-    fn a_null_intercept_is_distinguishable_from_an_unchecked_scan() {
+    fn an_empty_intercepts_array_is_distinguishable_from_an_unchecked_scan() {
         // The whole reason ShellMasking is a capability. Same shape as the shadow
         // case, and the mistake it prevents is reporting "nothing masks this" when
         // nothing was asked.
@@ -386,12 +389,17 @@ mod tests {
                 .any(|capability| capability == "shellMasking"),
             "a run that did not scan must not claim shellMasking"
         );
+        assert_eq!(unchecked["interpretersConsulted"], serde_json::json!([]));
 
         let mut scanned = sample();
         scanned.capabilities.push(Capability::ShellMasking);
+        scanned.interpreters_consulted = vec![Interpreter {
+            path: r"C:\WINDOWS\powershell.exe".to_owned(),
+            profile_loaded: false,
+        }];
         scanned.executables = vec![Resolved {
             stem: "gzip".to_owned(),
-            intercept: None,
+            intercepts: Vec::new(),
             occurrences: Vec::new(),
         }];
         let value = parse(&render(&scanned, false));
@@ -403,8 +411,62 @@ mod tests {
                 .flatten()
                 .any(|capability| capability == "shellMasking")
         );
-        // Now, and only now, does a null intercept mean "nothing masks it".
-        assert!(value["executables"][0]["intercept"].is_null());
+        // Now, and only now, does an empty array mean "nothing masks it".
+        assert_eq!(value["executables"][0]["intercepts"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn interpreters_consulted_turns_an_absent_record_into_a_verdict() {
+        // The ambiguity this removes: with two shells asked, a name carrying no pwsh
+        // record could mean "pwsh said no" or "pwsh was never asked". Only the
+        // top-level list can tell them apart.
+        let mut report = sample();
+        report.capabilities.push(Capability::ShellMasking);
+        report.interpreters_consulted = vec![
+            Interpreter {
+                path: r"C:\WINDOWS\powershell.exe".to_owned(),
+                profile_loaded: false,
+            },
+            Interpreter {
+                path: r"C:\pwsh7\pwsh.exe".to_owned(),
+                profile_loaded: false,
+            },
+        ];
+        // `curl` is the real case: an alias in 5.1, the actual curl.exe in 7.
+        report.executables = vec![Resolved {
+            stem: "curl".to_owned(),
+            intercepts: vec![Intercept {
+                construct: ShellConstruct::Alias,
+                resolves_to: Some("Invoke-WebRequest".to_owned()),
+                interpreter: r"C:\WINDOWS\powershell.exe".to_owned(),
+                profile_loaded: false,
+            }],
+            occurrences: Vec::new(),
+        }];
+
+        let value = parse(&render(&report, false));
+
+        assert_eq!(
+            value["interpretersConsulted"],
+            serde_json::json!([
+                { "path": r"C:\WINDOWS\powershell.exe", "profileLoaded": false },
+                { "path": r"C:\pwsh7\pwsh.exe", "profileLoaded": false },
+            ])
+        );
+
+        // Masked in one, and demonstrably clear in the other rather than unknown.
+        let intercepts = value["executables"][0]["intercepts"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(intercepts.len(), 1);
+        assert_eq!(intercepts[0]["interpreter"], r"C:\WINDOWS\powershell.exe");
+        assert!(
+            !intercepts
+                .iter()
+                .any(|i| i["interpreter"] == r"C:\pwsh7\pwsh.exe"),
+            "pwsh was consulted and is clear, so it must not appear here"
+        );
     }
 
     #[test]
