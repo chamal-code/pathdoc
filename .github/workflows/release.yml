@@ -1,0 +1,213 @@
+# Release for pathdoc. Triggered by pushing a tag matching `v*`.
+#
+# Two jobs, and the split is about privilege rather than tidiness.
+#
+# `gate` runs the same portable gate as CI and holds `contents: read`. `release`
+# builds the artifact and publishes it, and is the only thing in this repository
+# holding `contents: write`. `needs: gate` means a tagged binary cannot be published
+# without having passed the tests first — a tagged artifact is the one thing people
+# download and trust without reading anything, so it gets the strictest gate.
+#
+# Note what the privileged job does *not* do: it runs no third-party action. `gate`
+# uses `taiki-e/install-action` to get `just`, `nextest` and `deny` as prebuilt
+# binaries, and that job can only read a public repository. `release` uses first-party
+# checkout, the toolchain already on the runner, and `gh`, which is preinstalled on
+# GitHub-hosted runners. So the token that can write to this repository is never in a
+# job that executes a third party's code. That is the same trust-boundary reasoning
+# that justified `install-action` in `check.yml`, reaching a different answer here
+# because a first-party alternative exists.
+#
+# Every value from the event — the tag above all — reaches PowerShell through `env:`
+# rather than being interpolated into the script body. `${{ }}` is substituted as text
+# before any shell sees it, so a ref containing a quote would otherwise be splicing
+# itself into a script. Only the owner can push a tag here, but the safe form costs
+# nothing and does not depend on that staying true.
+#
+# KNOWN CONSTRAINT: a workflow cannot exceed the repository's
+# `default_workflow_permissions`. While that setting is "read", this job's request for
+# `contents: write` is capped and `gh release create` fails with 403. That is the
+# repository setting rather than this file — raise it under
+# Settings -> Actions -> General before pushing a tag.
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  # Deliberately no `workflow_dispatch`. Every release corresponds to a tag, so an
+  # artifact is always traceable to an immutable ref.
+
+# Read-only by default. The one job that needs more asks for itself.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  gate:
+    name: gate before publishing
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      # Pinned to a commit SHA, not a tag, so a moved tag cannot change what runs.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: taiki-e/install-action@26e9283f268b880168bdbd2c545dfcd60ec2c6ab # v2
+        with:
+          tool: just,cargo-nextest,cargo-deny
+
+      - run: rustc --version && cargo --version
+
+      # fmt-check, clippy in both feature configurations, the portable tests, and the
+      # licence and advisory gates. 24 machine-specific tests skip here, correctly.
+      - run: just check-portable
+
+      # A tag disagreeing with the manifest produces an artifact whose `--version`
+      # contradicts its own filename. Cheap to check, annoying to discover later.
+      - name: the tag matches the version in Cargo.toml
+        shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          $expected = $env:TAG -replace '^v', ''
+          $meta = cargo metadata --format-version 1 --no-deps | ConvertFrom-Json
+          $actual = ($meta.packages | Where-Object { $_.name -eq 'pathdoc-cli' }).version
+          if ($actual -ne $expected) {
+            Write-Error "tag $env:TAG implies version $expected, but pathdoc-cli is $actual"
+            exit 1
+          }
+          Write-Host "tag $env:TAG matches pathdoc-cli $actual"
+          exit 0
+
+  release:
+    name: build and publish
+    needs: gate
+    runs-on: windows-latest
+    timeout-minutes: 15
+    # The only place in this repository that asks for write, scoped to this job rather
+    # than the workflow so the job running third-party code cannot reach it.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      # `--locked` so the artifact is built against the committed Cargo.lock rather
+      # than whatever resolves newest today. A published binary that cannot be
+      # reproduced from its tag is not much of a published binary.
+      - name: build
+        run: cargo build --release --locked -p pathdoc-cli
+
+      # Prove it runs before publishing it, and prove it agrees with its own tag.
+      # `--version` exits 0 and touches nothing, which is what makes it the right
+      # smoke test for a tool whose whole claim is that it does not write.
+      - name: the binary runs and reports the tagged version
+        shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          $reported = ((./target/release/pathdoc.exe --version) -join '').Trim()
+          $expected = 'pathdoc ' + ($env:TAG -replace '^v', '')
+          if ($reported -ne $expected) {
+            Write-Error "binary reported '$reported', expected '$expected'"
+            exit 1
+          }
+          Write-Host $reported
+          exit 0
+
+      # A bare .exe would not satisfy Apache-2.0 section 4, which requires the licence
+      # to travel with a redistribution, so both licence files and the README go in the
+      # zip. Shipping a binary with no licence beside it is the same class of gap as
+      # declaring a licence in Cargo.toml with no files behind it.
+      #
+      # The archive contains a top-level directory, so extracting it in a Downloads
+      # folder does not scatter four loose files across it.
+      - name: package
+        shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          # Compress-Archive draws a progress bar that a non-interactive log renders as
+          # hundreds of lines of noise, and suppressing it is also measurably faster.
+          $ProgressPreference = 'SilentlyContinue'
+
+          $version = $env:TAG -replace '^v', ''
+          $stem = "pathdoc-$version-x86_64-pc-windows-msvc"
+          Add-Content -Path $env:GITHUB_ENV -Value "ASSET_STEM=$stem" -Encoding ascii
+
+          New-Item -ItemType Directory -Path "dist/$stem" -Force | Out-Null
+          Copy-Item ./target/release/pathdoc.exe "dist/$stem/"
+          Copy-Item ./LICENSE-APACHE, ./LICENSE-MIT, ./README.md "dist/$stem/"
+
+          Compress-Archive -Path "dist/$stem" -DestinationPath "dist/$stem.zip"
+          Get-ChildItem "dist/$stem" | ForEach-Object { "  packaged $($_.Name)" }
+          exit 0
+
+      # `<lowercase hash><two spaces><filename>`, which is what `sha256sum -c` reads
+      # and what anyone checking by hand expects. ASCII so no BOM appears in front of
+      # the first hash, which would break exactly that check.
+      #
+      # Only the uploaded asset is listed. Adding a line for `pathdoc.exe` inside the
+      # zip would be a small convenience and would make `sha256sum -c` report a
+      # missing file, so it is left out.
+      - name: checksums
+        shell: pwsh
+        run: |
+          Push-Location dist
+          $file = "$env:ASSET_STEM.zip"
+          $hash = (Get-FileHash $file -Algorithm SHA256).Hash.ToLower()
+          "$hash  $file" | Out-File -FilePath SHA256SUMS.txt -Encoding ascii
+          Get-Content SHA256SUMS.txt
+          Pop-Location
+          exit 0
+
+      # The notes body lives in `.github/release-notes-template.md`, not in a
+      # here-string here, and that is not a style preference. A PowerShell here-string
+      # terminator must be the first thing on its line, while a YAML block scalar
+      # requires every content line indented past its key — the two rules cannot both
+      # be satisfied, so an inline here-string truncates the block and yields invalid
+      # YAML. Caught by parsing this file rather than by a failed release.
+      #
+      # `utf8NoBOM` matters: `gh` would otherwise put a BOM at the top of the release
+      # body, where it renders as a stray character.
+      - name: release notes
+        shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          $notes = Get-Content .github/release-notes-template.md -Raw
+          $notes = $notes.Replace('{{REPO}}', $env:REPO).
+                          Replace('{{STEM}}', $env:ASSET_STEM).
+                          Replace('{{TAG}}', $env:TAG)
+          if ($notes -match '\{\{') {
+            Write-Error 'a placeholder in the release notes template was not substituted'
+            exit 1
+          }
+          # The template opens with an HTML comment explaining why it is a separate
+          # file. That is for maintainers, so it is stripped rather than shipped
+          # invisibly in every release body.
+          $notes = $notes -replace '(?s)^<!--.*?-->\r?\n', ''
+          Set-Content -Path dist/notes.md -Value $notes -Encoding utf8NoBOM
+          Get-Content dist/notes.md
+          exit 0
+
+      # `gh`, preinstalled on GitHub-hosted runners, rather than a third-party release
+      # action. `--verify-tag` refuses to invent a release for a tag that is not
+      # actually on the remote.
+      - name: publish
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          $version = $env:TAG -replace '^v', ''
+          gh release create $env:TAG `
+            "dist/$env:ASSET_STEM.zip" `
+            "dist/SHA256SUMS.txt" `
+            --title "pathdoc $version" `
+            --notes-file dist/notes.md `
+            --verify-tag
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Write-Host "published $env:TAG"
+          exit 0

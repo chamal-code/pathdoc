@@ -10,17 +10,117 @@ Pointed at a GitHub Actions `windows-latest` runner it finds ten problems in
 Microsoft's own image, including five `PATH` directories that do not exist. That is
 CI output, not a contrived example: [see below](#what-it-finds-on-somebody-elses-machine).
 
-**It never writes.** No PATH edits, no registry writes, no fix mode. That is a
-deliberate constraint, not an unfinished feature.
+## Problems this diagnoses
 
-## Why
+Named concretely, because a symptom is what you search for at the moment you hit it.
+Every one of these was hit on a single machine over a single day of provisioning:
 
-Provisioning this machine turned up `git` resolving into a retired application's
-private folder, a second vendored `git` hiding somewhere else, `gzip`, `bash`,
-`unzip` and `sdiff` all coming from that same folder, `python` resolving to a
-Microsoft Store stub, our own `uv` losing to a vendored copy on user-PATH order,
-and one entry pointing at a directory that no longer exists. All of it found by
-hand. This tool exists so that is a command instead of an afternoon.
+- **`git` is not the `git` you installed.** It resolves to a copy vendored inside
+  some other application — an Electron app, an AI assistant, an installer's private
+  `portable-git` — because that copy's directory sits earlier on `PATH`. There were
+  two such copies here, and `gzip`, `bash`, `unzip` and `sdiff` all came from one of
+  them.
+- **`node`, `npm` or `npx` resolves to the wrong version, or cannot be found at
+  all.** Version managers inject a per-shell shim directory, so the answer differs
+  between the shell you are in and a shell started fresh, and neither is wrong.
+- **`diff`, `fc`, `where`, `sc` and `curl` are not the programs you think they are.**
+  In PowerShell they are aliases, resolved *before* `PATH` is searched, so typing
+  `sc` never reaches `sc.exe` — the Service Control tool — however healthy that
+  directory is. 24 names are masked this way here.
+- **A `PATH` entry points at a directory that no longer exists.** Left behind by an
+  uninstall, and it slows down every single command lookup.
+- **`python` runs a Microsoft Store stub** rather than the interpreter you
+  installed, because the stub is a reparse point in `WindowsApps` and nothing said so.
+- **A build or a test started failing and nothing in the repository changed**,
+  because something rewrote `PATH` underneath it and no shell had been restarted.
+- **Two copies of a tool are installed and you cannot tell which one wins** — the
+  case that motivated this, where our own `uv` was losing to a vendored copy purely
+  on user-`PATH` ordering.
+
+All of it was found by hand. This tool exists so that is one command instead of an
+afternoon.
+
+## What it will not do
+
+- **It never writes.** No `PATH` edits, no registry writes, no fix mode, not even
+  behind a flag. A tool that audits `PATH` and a tool that edits `PATH` have very
+  different blast radii, and the second needs a design for backups, dry-run and
+  confirmation before a line of it is written.
+- **It never touches the network.** No telemetry, no update check, nothing resolved
+  remotely. It reads your registry and the directories already on your `PATH`, and
+  that is all.
+- **It runs no code of yours unless you ask it to.** The shell scan passes
+  `-NoProfile`, so your PowerShell profile is not executed. `--shell-scan profile`
+  opts in, and it is the only mode that does.
+
+Stated rather than left to be inferred, because "is it safe to run this on my
+machine" should not require reading the source first.
+
+## Install
+
+With Rust already installed:
+
+```powershell
+cargo install --git https://github.com/chamal-code/pathdoc pathdoc-cli --locked
+```
+
+That builds from source and puts `pathdoc.exe` in `~\.cargo\bin`, which rustup
+already has on `PATH`. `--locked` uses the committed `Cargo.lock`, so you get the
+dependency versions this was actually tested against. The crates carry
+`publish = false` because they are not on crates.io and are not claiming those
+names; that does not affect installing from git.
+
+Without Rust, download the zip from the
+[latest release](https://github.com/chamal-code/pathdoc/releases/latest), extract it
+anywhere, and run `pathdoc.exe`. It is one self-contained executable — no runtime to
+install, no installer, and nothing written outside the folder you put it in.
+
+Windows only, and not by omission: it reads the registry and file attributes through
+Windows-specific APIs, so the workspace does not compile for any other target.
+
+### The release binary is unsigned
+
+There is no code-signing certificate behind this project, so Windows SmartScreen will
+warn the first time you run a downloaded `pathdoc.exe` — usually "Windows protected
+your PC", with the real button behind **More info**. That warning is the *absence of a
+signature*, not the detection of anything. It cannot be fixed without buying a
+certificate, so rather than pretend otherwise: verify the download instead.
+
+Every release ships `SHA256SUMS.txt`:
+
+```powershell
+Get-FileHash .\pathdoc-0.1.0-x86_64-pc-windows-msvc.zip -Algorithm SHA256
+# then compare Hash against the matching line in SHA256SUMS.txt
+```
+
+The zip also contains both licence files and this README, so the licence travels with
+the binary as Apache-2.0 requires. If you would rather not trust a prebuilt binary at
+all, `cargo install --git` above builds the same commit yourself.
+
+## For automated use
+
+Three facts, if you are wiring this into a script, a CI job, or an agent:
+
+```powershell
+pathdoc --json
+```
+
+- **`--json` emits a versioned contract.** `schemaVersion` is `4` and is the first
+  field. It only increases, and every change so far has been purely additive. Field
+  names and enum tags are pinned by tests, so breaking a consumer breaks a build here
+  first. Full contract in [`docs/SPEC.md`](docs/SPEC.md).
+- **Exit codes are `0` clean, `1` actionable findings reported, `2` fatal.**
+  Shadowing and shell masking are always reported and never gate the exit code,
+  because something is shadowed and something is masked on every Windows machine, and
+  a signal that is on everywhere is not a signal. `--fail-on-shadow` opts in if you
+  want it gate-worthy.
+- **Check `capabilities` before you trust an empty list.** An empty `executables`
+  means "nothing found" only when `shadowDetection` is listed; otherwise it means "not
+  computed". The same applies to empty `intercepts` and `shellMasking`. Skip that
+  check and you will report a clean bill of health for work that never ran.
+
+Safe to run unattended, per the section above: it never writes and never uses the
+network. `--no-color` for clean logs, though `NO_COLOR` is honoured too.
 
 ## Status
 
@@ -58,10 +158,15 @@ A per-shell shim injected at the front of the live `PATH` beats a registry entry
 now and loses to it after a restart, so the output says which process a verdict
 describes, and flags any directory the running process cannot see yet.
 
-Next up is the roadmap in [`docs/SPEC.md`](docs/SPEC.md) — shell-level alias
-masking, decoding `WindowsApps` stubs to their owning package, and an env-var
-backup and diff tool sharing this registry layer. Mutation stays out until it has
-a design for backups, dry-run and confirmation.
+Version `0.1.0`, and deliberately not `1.0.0`. The JSON contract is at
+`schemaVersion` 4 and the roadmap still holds items that will change it — decoding
+`WindowsApps` stubs to their owning package, and an automated cross-check against
+`Get-Command`. Semver `0.x` says "this may still change", which is true; `1.0.0`
+would promise a stability nobody has decided to offer yet.
+
+The rest of the roadmap is in [`docs/SPEC.md`](docs/SPEC.md), including an env-var
+backup and diff tool sharing this registry layer. Mutation stays out until it has a
+design for backups, dry-run and confirmation.
 
 Full behaviour, the JSON contract and verification criteria are also in
 [`docs/SPEC.md`](docs/SPEC.md).
@@ -84,6 +189,8 @@ crates/pathdoc-cli/                 binary `pathdoc`: all formatting lives here
   src/table.rs                        the human rendering
   src/json.rs                         the versioned contract, with its assertions
 docs/SPEC.md                        specification, JSON contract, roadmap
+.github/workflows/check.yml         CI: the gate, read-only
+.github/workflows/release.yml       tag-triggered release, the only job that can write
 .kiro/steering/00-project.md        rules and gotchas for anyone working on this
 ```
 
@@ -100,7 +207,10 @@ backup tool needs exactly that and none of `PathEntry`, `Resolved` or
 `AuditReport`. Dependencies point from each tool at `winenv`, never from one tool at
 another.
 
-## Running it
+## Running it from source
+
+If you only want to use the tool, [Install](#install) above is the shorter path. This
+section is the contributor's one, from a clone.
 
 ```powershell
 just                        # list the recipes
@@ -140,14 +250,11 @@ Run the built binary directly rather than through `cargo run` if the process-onl
 count matters: cargo prepends its own directories to the child's `PATH`, so
 `cargo run` reports four more injected entries than a plain shell does.
 
-Exit codes are `0` clean, `1` actionable findings reported, `2` fatal. The code
-describes what was reported, so it respects `--scope`.
-
-Only per-entry findings gate it — a dead directory, a duplicate, a stray separator,
-things a person can go and fix. Shadowing is always reported but never fails the
-run, because `system32` alone ships eight names under two extensions apiece and a
-signal that is on for every machine is not a signal. Use `--fail-on-shadow` when
-you do want it gate-worthy.
+On the exit codes summarised under [For automated use](#for-automated-use), one
+detail worth spelling out: the code describes *what was reported*, so it respects
+`--scope`. Only per-entry findings gate it — a dead directory, a duplicate, a stray
+separator, things a person can go and fix. `system32` alone ships eight names under
+two extensions apiece, which is why shadowing does not.
 
 What the output looks like:
 
@@ -283,7 +390,7 @@ would have been simpler and would have thrown away a drift canary that has caugh
 two unannounced `PATH` changes. `just test-portable` shows exactly what you see;
 `just test-machine` runs only them.
 
-## CI
+## CI and releases
 
 `.github/workflows/check.yml`, two jobs, and the split is forced by the code rather
 than chosen:
@@ -357,6 +464,35 @@ far more modules than this machine does. The point was never trimming 69 ms; it 
 deleting a cost that grows with the host, which no local measurement can show you.
 The run after the fix: zero `LEAK` markers, 150 passed and 24 skipped in 5.6 s, and
 no test over ten seconds.
+
+### Releases
+
+`.github/workflows/release.yml`, triggered by pushing a tag matching `v*`. Two jobs,
+and here the split is about privilege:
+
+- **`gate`** runs `just check-portable` and holds `contents: read`. It also checks the
+  tag against the version in `Cargo.toml`, so a mistagged release cannot ship a binary
+  whose `--version` contradicts its own filename.
+- **`release`** builds with `--locked`, packages, and publishes. It is the only job in
+  this repository holding `contents: write`, and `needs: gate` means an artifact
+  nobody has tested cannot be published.
+
+Least privilege is per job rather than per repository, and the privileged job
+deliberately runs **no third-party action**. The gate needs `just`, `nextest` and
+`deny`, so it uses `taiki-e/install-action` with a token that can only read a public
+repo. The release job uses first-party checkout, the toolchain already on the runner,
+and `gh`, which is preinstalled. So the token that can write here is never in a job
+executing somebody else's code.
+
+Values from the event reach PowerShell through `env:` rather than `${{ }}`
+interpolation into the script body, because `${{ }}` is textual substitution and a ref
+containing a quote would be splicing itself into a script.
+
+The artifact is a zip, not a bare `.exe`: `pathdoc.exe`, `LICENSE-APACHE`,
+`LICENSE-MIT` and `README.md`, alongside a separate `SHA256SUMS.txt`. Apache-2.0
+section 4 requires the licence to travel with a redistribution, and a lone executable
+does not carry it — the same class of gap as declaring a licence in `Cargo.toml` with
+no files behind it, which this repository also had until it was caught.
 
 ## Licence
 

@@ -14,7 +14,7 @@
 # Note `just check-portable` and not `just check`: `check` runs the machine-specific
 # acceptance tests via `--run-ignored all`, and those describe one particular
 # machine's registry. On a runner they must skip, which is what `check-portable`
-# arranges. A green Windows job reporting 19 skipped is the correct outcome.
+# arranges. A green Windows job reporting 24 skipped is the correct outcome.
 
 name: check
 

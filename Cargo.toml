@@ -6,11 +6,19 @@ members = ["crates/winenv", "crates/pathdoc-core", "crates/pathdoc-cli"]
 resolver = "3"
 
 [workspace.package]
+# 0.x deliberately. The JSON contract is at schemaVersion 4 and roadmap items that
+# will change it are still outstanding, so semver 0.x is the accurate claim. 1.0.0
+# would promise a stability nobody has decided to offer.
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.98"
 license = "MIT OR Apache-2.0"
+# Not on crates.io and not claiming those names. This does not affect
+# `cargo install --git`, which is the documented way to install from source.
 publish = false
+# Reaches `cargo metadata`, so anyone who installed from git can find their way back
+# to the source and the docs without guessing.
+repository = "https://github.com/chamal-code/pathdoc"
 
 # The core crate wraps the registry, which means the unsafe lives in our
 # dependencies, not in us. Keep it that way.
