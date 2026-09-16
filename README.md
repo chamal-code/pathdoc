@@ -6,6 +6,10 @@ It reports which directories are on `PATH` in the order Windows actually resolve
 them, which entries are dead or duplicated, and — the useful part — which
 executables are shadowing which.
 
+Pointed at a GitHub Actions `windows-latest` runner it finds ten problems in
+Microsoft's own image, including five `PATH` directories that do not exist. That is
+CI output, not a contrived example: [see below](#what-it-finds-on-somebody-elses-machine).
+
 **It never writes.** No PATH edits, no registry writes, no fix mode. That is a
 deliberate constraint, not an unfinished feature.
 
@@ -263,6 +267,28 @@ That job still earns its place. It is the only thing that exercises
 `set windows-shell` in the justfile — with `set shell` those two recipes would try to
 spawn `powershell.exe` on Ubuntu. And `cargo deny` resolves the graph for the target
 named in `deny.toml`, so the licence verdict is host-independent.
+
+### What it finds on somebody else's machine
+
+The Windows job audits the runner's own `PATH`, which makes every CI run a test of
+whether this tool generalises past the machine it was written on. On a
+`windows-latest` runner:
+
+```
+PATH composition  (68 machine, 4 user, 0 injected at runtime)
+Findings  (10)
+schemaVersion 3, 72 entries, 1537 names
+```
+
+Ten findings on Microsoft's own runner image, including **five directories on `PATH`
+that do not exist** and a `dotnet\` entry duplicating an earlier one. Across 72
+entries and 1537 executable names, none of which anybody here chose.
+
+That is better evidence than any example this README could construct, and it is
+reproducible: the workflow is in this repository, so the numbers above come from a
+machine neither the author nor you controls. It also means the tool is not
+pattern-matching one hand-tuned `PATH` — the assertions in `this_machine.rs` describe
+one machine, but the analysis does not.
 
 ## Licence
 

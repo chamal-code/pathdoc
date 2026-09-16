@@ -40,15 +40,21 @@ jobs:
   windows:
     name: gate (windows)
     runs-on: windows-latest
+    # The first green run took 1.8 minutes. This is a ceiling for a hung job, not a
+    # budget: without it a hang runs to GitHub's six-hour limit and feedback with it.
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      # Actions are pinned to commit SHAs, not tags, so a moved tag cannot change
+      # what runs. The trailing comment is the human-readable version; verified with
+      # `git ls-remote --tags` rather than copied on trust.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # Prebuilt binaries. The alternative, `cargo install --locked`, needs no
       # third-party action but builds cargo-deny from source on every run, which
-      # costs minutes. Worth revisiting if the trust boundary matters more than the
-      # time; pinning these to full commit SHAs rather than major tags would be the
-      # next tightening either way.
-      - uses: taiki-e/install-action@v2
+      # costs minutes. The mitigation for the trust boundary is the read-only
+      # `permissions` block above: a compromised action gets a token that can do
+      # nothing but read a public repository.
+      - uses: taiki-e/install-action@26e9283f268b880168bdbd2c545dfcd60ec2c6ab # v2
         with:
           tool: just,cargo-nextest,cargo-deny
 
@@ -97,10 +103,12 @@ jobs:
   linux:
     name: platform-independent recipes (linux)
     runs-on: ubuntu-latest
+    # No compilation happens here, so this should be quick. Same reasoning as above.
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@26e9283f268b880168bdbd2c545dfcd60ec2c6ab # v2
         with:
           tool: just,cargo-deny
 
